@@ -8815,12 +8815,16 @@ async function runAiQuiz(){
      (#settings, .settings, [id*="settings"]) — otherwise it shows
      as its own small floating card, bottom-left, so nothing breaks.
    - Redeeming a code unlocks a feature flag in localStorage.
-   - Built-in codes (change these to whatever you like):
-       SCHOLRADMIN   -> unlocks a hidden Admin Panel (view/export/
-                         clear localStorage, live app stats, debug mode)
-       CONFETTI      -> celebratory confetti burst
-       RAINBOW       -> animated rainbow accent mode
-       NIGHTOWL      -> extra-dim "night owl" theme tweak
+   - Codes now unlock real functionality instead of pure cosmetic
+     reskins — each one turns on a small working tool:
+       !BSHUI596!  -> hidden Admin Panel (view/export/import/reset
+                       localStorage, live app stats, debug mode)
+       STR2030     -> Starter Pack (unlocks the base feature set)
+       STR-PARTY   -> celebratory confetti burst
+       STR-FOCUS   -> working Pomodoro focus timer widget
+       STR-STREAK  -> daily streak tracker (counts consecutive days)
+       STR-SOUND   -> real click sound effects (Web Audio, no assets)
+       STR-NOTES   -> floating quick-notes widget that saves as you type
    - Adds reusable animation classes (ripple buttons, card lift,
      shimmer skeleton, staggered fade-in lists, confetti, toast pop)
      you can reuse anywhere else in Scholr too.
@@ -8833,7 +8837,6 @@ const BONUS_CSS = `
 @keyframes bonusShimmer{0%{background-position:-200px 0}100%{background-position:200px 0}}
 @keyframes bonusRipple{to{transform:scale(3);opacity:0}}
 @keyframes bonusConfettiFall{to{transform:translateY(110vh) rotate(540deg);opacity:0}}
-@keyframes bonusRainbowShift{0%{filter:hue-rotate(0deg)}100%{filter:hue-rotate(360deg)}}
 @keyframes bonusCheckPop{0%{transform:scale(0) rotate(-20deg)}70%{transform:scale(1.15) rotate(4deg)}100%{transform:scale(1) rotate(0)}}
 
 .bonus-stagger > *{animation:bonusFadeUp .35s ease both}
@@ -8857,7 +8860,6 @@ const BONUS_CSS = `
 }
 
 .bonus-check-pop{animation:bonusCheckPop .4s cubic-bezier(.34,1.56,.64,1) both}
-.bonus-rainbow-mode{animation:bonusRainbowShift 6s linear infinite}
 
 .bonus-confetti-piece{
   position:fixed;top:-20px;z-index:99999;pointer-events:none;border-radius:2px;
@@ -8901,6 +8903,11 @@ const BONUS_CSS = `
   padding:6px 10px;font-size:11.5px;cursor:pointer;transition:all .15s;
 }
 .bonus-admin-btns button:hover{border-color:var(--ac);color:var(--ac);transform:translateY(-1px)}
+.bonus-admin-btns button.danger:hover{border-color:#dc2626;color:#dc2626}
+.bonus-admin-keys{max-height:160px;overflow-y:auto;border:1px solid var(--bor);border-radius:8px;background:var(--bg)}
+.bonus-admin-keys table{width:100%;border-collapse:collapse;font-size:11px}
+.bonus-admin-keys td{padding:4px 8px;border-bottom:1px solid var(--bor);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:140px}
+.bonus-admin-keys td:last-child{text-align:right;color:var(--ink4);white-space:nowrap}
 
 .bonus-floating-card{
   position:fixed;left:20px;bottom:20px;z-index:7500;width:280px;max-width:calc(100vw - 40px);
@@ -8911,25 +8918,48 @@ const BONUS_CSS = `
   display:flex;align-items:center;gap:6px}
 .bonus-floating-card summary::-webkit-details-marker{display:none}
 
-/* new bonus theme flags */
-.bonus-gold-mode{--ac:#d4af37 !important;--ac2:#f0c869 !important}
-.bonus-turbo-mode *{transition-duration:.08s !important;animation-duration:.5s !important}
-.bonus-zen-mode .ai-chat-fab,.bonus-zen-mode .bonus-floating-card{filter:saturate(.7) brightness(.97)}
-.bonus-zen-mode *{animation-duration:.6s !important}
+/* ---- Feature widgets (replace old pure-theme flags) ---- */
+.bonus-streak-badge{
+  position:fixed;right:20px;bottom:20px;z-index:7400;display:flex;align-items:center;gap:6px;
+  background:var(--sur);border:1px solid var(--bor);border-radius:99px;padding:7px 13px;
+  font-size:12px;font-weight:700;box-shadow:var(--sh2);animation:bonusPop .3s cubic-bezier(.34,1.56,.64,1) both;
+}
+
+.bonus-timer-card{
+  position:fixed;right:20px;bottom:20px;z-index:7600;width:220px;background:var(--sur);
+  border:1px solid var(--bor);border-radius:14px;box-shadow:var(--sh3);padding:14px;
+  animation:bonusPop .3s cubic-bezier(.34,1.56,.64,1) both;
+}
+.bonus-timer-mode{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--ac)}
+.bonus-timer-clock{font-family:var(--font-m);font-size:32px;font-weight:700;margin:8px 0;text-align:center}
+.bonus-timer-btns{display:flex;gap:6px}
+.bonus-timer-btns button{
+  flex:1;border:1px solid var(--bor);background:var(--s2);color:var(--ink2);border-radius:8px;
+  padding:6px 0;font-size:11.5px;cursor:pointer;
+}
+.bonus-timer-btns button:hover{border-color:var(--ac);color:var(--ac)}
+.bonus-timer-close{position:absolute;top:8px;right:10px;background:none;border:none;color:var(--ink4);font-size:13px;cursor:pointer}
+
+.bonus-notes-card{
+  position:fixed;right:20px;bottom:20px;z-index:7600;width:230px;background:var(--sur);
+  border:1px solid var(--bor);border-radius:14px;box-shadow:var(--sh3);padding:12px;
+  animation:bonusPop .3s cubic-bezier(.34,1.56,.64,1) both;
+}
+.bonus-notes-card textarea{
+  width:100%;min-height:120px;border:1px solid var(--bor);border-radius:8px;padding:8px;
+  font-size:12px;font-family:var(--font);resize:vertical;background:var(--bg);color:var(--ink);outline:none;
+}
+.bonus-notes-close{position:absolute;top:8px;right:10px;background:none;border:none;color:var(--ink4);font-size:13px;cursor:pointer}
 `;
 
 const BONUS_CODES = {
-  '!BSHUI596!': { flag: 'admin',    label: '🛠️ Admin Panel' },
-  STR2030:      { flag: 'starter',  label: '⭐ Starter Pack (unlocked by default)' },
-  'STR-PARTY':  { flag: 'confetti', label: '🎉 Confetti mode' },
-  'STR-COLOR':  { flag: 'rainbow',  label: '🌈 Rainbow accent' },
-  'STR-OWL':    { flag: 'nightowl', label: '🦉 Night Owl tweak' },
-  'STR-GOLD':   { flag: 'gold',     label: '🏆 Gold accent theme' },
-  'STR-TURBO':  { flag: 'turbo',    label: '⚡ Turbo mode (snappier animations)' },
-  'STR-ZEN':    { flag: 'zen',      label: '🧘 Zen mode (calmer, minimal UI)' },
-  'STR-FOCUS':  { flag: 'focus',    label: '⏱️ Focus Timer widget (Pomodoro)' },
-  'STR-STREAK': { flag: 'streak',   label: '🔥 Daily Streak tracker' },
-  'STR-SOUND':  { flag: 'sound',    label: '🔊 Click sound effects' },
+  '!BSHUI596!': { flag: 'admin',   label: '🛠️ Admin Panel' },
+  STR2030:      { flag: 'starter', label: '⭐ Starter Pack (unlocked by default)' },
+  'STR-PARTY':  { flag: 'confetti',label: '🎉 Confetti mode' },
+  'STR-FOCUS':  { flag: 'focus',   label: '⏱️ Focus Timer (Pomodoro)' },
+  'STR-STREAK': { flag: 'streak',  label: '🔥 Daily Streak tracker' },
+  'STR-SOUND':  { flag: 'sound',   label: '🔊 Click sound effects' },
+  'STR-NOTES':  { flag: 'notes',   label: '🗒️ Quick Notes widget' },
 };
 
 function bonusGetUnlocked(){
@@ -8945,7 +8975,7 @@ function bonusRedeemCode(){
   const msg = g('bonus-code-msg');
   if (!input) return;
   const code = input.value.trim().toUpperCase();
-  const entry = BONUS_CODES[code];
+  const entry = BONUS_CODES[code] || BONUS_CODES[input.value.trim()]; // admin code keeps its exact-case symbols
   const flags = bonusGetUnlocked();
 
   if (!code) { msg.textContent = 'Enter a code first.'; msg.className = 'bonus-codes-msg err'; return; }
@@ -8954,7 +8984,7 @@ function bonusRedeemCode(){
 
   flags[entry.flag] = true;
   if (entry.flag === 'starter') {
-    ['confetti','rainbow','nightowl','gold','turbo','zen'].forEach(f => flags[f] = true);
+    ['confetti','focus','streak','sound','notes'].forEach(f => flags[f] = true);
   }
   bonusSetUnlocked(flags);
   msg.textContent = '✅ Unlocked: ' + entry.label;
@@ -8978,13 +9008,18 @@ function bonusRenderUnlocked(){
     items.forEach(([code, v]) => {
       const row = document.createElement('div');
       row.className = 'bonus-unlocked-item bonus-check-pop';
-      row.innerHTML = `<span>${v.label}</span><span style="color:var(--ink4);font-size:10.5px">${code}</span>`;
+      let extra = '';
+      if (v.flag === 'focus') extra = `<button class="bonus-ripple" style="border:1px solid var(--bor);background:var(--bg);border-radius:6px;padding:3px 8px;font-size:10.5px;cursor:pointer" onclick="bonusOpenTimer()">Open</button>`;
+      if (v.flag === 'notes') extra = `<button class="bonus-ripple" style="border:1px solid var(--bor);background:var(--bg);border-radius:6px;padding:3px 8px;font-size:10.5px;cursor:pointer" onclick="bonusOpenNotes()">Open</button>`;
+      if (v.flag === 'streak') extra = `<span style="color:var(--ac);font-weight:700">${bonusStreakDays()}d</span>`;
+      row.innerHTML = `<span>${v.label}</span><span style="display:flex;align-items:center;gap:6px"><span style="color:var(--ink4);font-size:10.5px">${code}</span>${extra}</span>`;
       listEl.appendChild(row);
     });
   }
   if (adminSlot) adminSlot.innerHTML = flags.admin ? bonusAdminPanelHtml() : '';
 }
 
+/* ---------- Admin Panel ---------- */
 function bonusAdminPanelHtml(){
   let keyCount = 0, approxBytes = 0;
   try {
@@ -8994,17 +9029,28 @@ function bonusAdminPanelHtml(){
       approxBytes += (k?.length || 0) + (localStorage.getItem(k)?.length || 0);
     }
   } catch (_) {}
+  const flags = bonusGetUnlocked();
+  const unlockedCount = Object.values(flags).filter(Boolean).length;
+  const streak = bonusStreakInfo();
   return `
     <div class="bonus-admin-panel bonus-check-pop">
       <div style="font-weight:700;font-size:12.5px">🛠️ Admin Panel</div>
       <div class="bonus-admin-stat"><span>localStorage keys</span><span>${keyCount}</span></div>
       <div class="bonus-admin-stat"><span>Approx. storage used</span><span>${(approxBytes/1024).toFixed(1)} KB</span></div>
+      <div class="bonus-admin-stat"><span>Bonus features unlocked</span><span>${unlockedCount}</span></div>
+      <div class="bonus-admin-stat"><span>Current streak</span><span>${streak.count} day${streak.count===1?'':'s'} (best ${streak.best})</span></div>
       <div class="bonus-admin-stat"><span>Debug mode</span><span id="bonus-debug-state">${localStorage.getItem('scholr_debug') === '1' ? 'ON' : 'OFF'}</span></div>
       <div class="bonus-admin-btns">
         <button onclick="bonusToggleDebug()">Toggle debug mode</button>
+        <button onclick="bonusToggleKeysView()">View storage keys</button>
         <button onclick="bonusExportData()">Export data (JSON)</button>
-        <button onclick="bonusConfirmClear()">⚠️ Clear all local data</button>
+        <button onclick="bonusCopyData()">Copy data to clipboard</button>
+        <button onclick="bonusImportData()">Import data (JSON)</button>
+        <button onclick="bonusResetAnnouncements()">Reset announcements</button>
+        <button onclick="bonusResetBonusFeatures()">Reset bonus features only</button>
+        <button class="danger" onclick="bonusConfirmClear()">⚠️ Clear all local data</button>
       </div>
+      <div id="bonus-admin-keys" class="bonus-admin-keys" style="display:none"></div>
     </div>`;
 }
 
@@ -9013,6 +9059,20 @@ function bonusToggleDebug(){
   localStorage.setItem('scholr_debug', on ? '0' : '1');
   const el = g('bonus-debug-state');
   if (el) el.textContent = on ? 'OFF' : 'ON';
+}
+
+function bonusToggleKeysView(){
+  const box = g('bonus-admin-keys');
+  if (!box) return;
+  if (box.style.display !== 'none') { box.style.display = 'none'; return; }
+  let rows = '';
+  for (let i = 0; i < localStorage.length; i++) {
+    const k = localStorage.key(i);
+    const v = localStorage.getItem(k) || '';
+    rows += `<tr><td title="${k}">${k}</td><td>${(v.length/1024).toFixed(2)} KB</td></tr>`;
+  }
+  box.innerHTML = `<table>${rows || '<tr><td colspan="2">No keys stored.</td></tr>'}</table>`;
+  box.style.display = 'block';
 }
 
 function bonusExportData(){
@@ -9029,18 +9089,195 @@ function bonusExportData(){
   URL.revokeObjectURL(a.href);
 }
 
+function bonusCopyData(){
+  const data = {};
+  for (let i = 0; i < localStorage.length; i++) {
+    const k = localStorage.key(i);
+    data[k] = localStorage.getItem(k);
+  }
+  const text = JSON.stringify(data, null, 2);
+  const msg = g('bonus-code-msg');
+  const done = () => { if (msg) { msg.textContent = '📋 Data copied to clipboard.'; msg.className = 'bonus-codes-msg ok'; } };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(done).catch(() => {
+      if (msg) { msg.textContent = 'Could not copy — try Export instead.'; msg.className = 'bonus-codes-msg err'; }
+    });
+  } else {
+    if (msg) { msg.textContent = 'Clipboard not available — try Export instead.'; msg.className = 'bonus-codes-msg err'; }
+  }
+}
+
+function bonusImportData(){
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = 'application/json';
+  input.onchange = () => {
+    const file = input.files && input.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const data = JSON.parse(reader.result);
+        if (!confirm('Import this JSON into local storage? Existing keys with the same name will be overwritten.')) return;
+        Object.keys(data).forEach(k => localStorage.setItem(k, data[k]));
+        location.reload();
+      } catch (_) {
+        alert('That file is not valid JSON.');
+      }
+    };
+    reader.readAsText(file);
+  };
+  input.click();
+}
+
+function bonusResetAnnouncements(){
+  localStorage.removeItem('scholr_announce_seen');
+  const msg = g('bonus-code-msg');
+  if (msg) { msg.textContent = '🔁 Announcements will show again on next load.'; msg.className = 'bonus-codes-msg ok'; }
+}
+
+function bonusResetBonusFeatures(){
+  if (!confirm('This clears all redeemed bonus codes and feature data (streak, notes, timer settings). Continue?')) return;
+  ['scholr_bonus_flags','scholr_streak','scholr_quicknote'].forEach(k => localStorage.removeItem(k));
+  location.reload();
+}
+
 function bonusConfirmClear(){
   if (!confirm('This will erase ALL locally saved Scholr data on this device. This cannot be undone. Continue?')) return;
   localStorage.clear();
   location.reload();
 }
 
+/* ---------- Feature: Focus Timer (Pomodoro) ---------- */
+let _bonusTimerState = { seconds: 25*60, mode: 'Focus', running: false, handle: null };
+
+function bonusOpenTimer(){
+  if (g('bonus-timer-card')) return;
+  const card = document.createElement('div');
+  card.id = 'bonus-timer-card';
+  card.className = 'bonus-timer-card';
+  card.innerHTML = `
+    <button class="bonus-timer-close" onclick="bonusCloseTimer()">✕</button>
+    <div class="bonus-timer-mode" id="bonus-timer-mode">Focus</div>
+    <div class="bonus-timer-clock" id="bonus-timer-clock">25:00</div>
+    <div class="bonus-timer-btns">
+      <button class="bonus-ripple" id="bonus-timer-toggle" onclick="bonusToggleTimer()">Start</button>
+      <button class="bonus-ripple" onclick="bonusResetTimer()">Reset</button>
+    </div>`;
+  document.body.appendChild(card);
+  bonusRenderTimer();
+}
+function bonusCloseTimer(){
+  const card = g('bonus-timer-card');
+  if (card) card.remove();
+}
+function bonusRenderTimer(){
+  const m = Math.floor(_bonusTimerState.seconds / 60).toString().padStart(2,'0');
+  const s = (_bonusTimerState.seconds % 60).toString().padStart(2,'0');
+  const clock = g('bonus-timer-clock'); if (clock) clock.textContent = `${m}:${s}`;
+  const mode = g('bonus-timer-mode'); if (mode) mode.textContent = _bonusTimerState.mode;
+  const toggle = g('bonus-timer-toggle'); if (toggle) toggle.textContent = _bonusTimerState.running ? 'Pause' : 'Start';
+}
+function bonusToggleTimer(){
+  if (_bonusTimerState.running) {
+    clearInterval(_bonusTimerState.handle);
+    _bonusTimerState.running = false;
+  } else {
+    _bonusTimerState.running = true;
+    _bonusTimerState.handle = setInterval(() => {
+      _bonusTimerState.seconds--;
+      if (_bonusTimerState.seconds <= 0) {
+        const wasFocus = _bonusTimerState.mode === 'Focus';
+        _bonusTimerState.mode = wasFocus ? 'Break' : 'Focus';
+        _bonusTimerState.seconds = wasFocus ? 5*60 : 25*60;
+        if (window.aiSpeak) { try { aiSpeak(wasFocus ? 'Time for a break.' : 'Back to focus.'); } catch(_){} }
+      }
+      bonusRenderTimer();
+    }, 1000);
+  }
+  bonusRenderTimer();
+}
+function bonusResetTimer(){
+  clearInterval(_bonusTimerState.handle);
+  _bonusTimerState = { seconds: 25*60, mode: 'Focus', running: false, handle: null };
+  bonusRenderTimer();
+}
+
+/* ---------- Feature: Daily Streak tracker ---------- */
+function bonusStreakInfo(){
+  let data;
+  try { data = JSON.parse(localStorage.getItem('scholr_streak') || '{}'); } catch (_) { data = {}; }
+  return { count: data.count || 0, best: data.best || 0, lastDate: data.lastDate || null };
+}
+function bonusStreakDays(){ return bonusStreakInfo().count; }
+function bonusStreakCheck(){
+  const todayStr = new Date().toDateString();
+  const data = bonusStreakInfo();
+  if (data.lastDate === todayStr) return; // already counted today
+  const yesterday = new Date(); yesterday.setDate(yesterday.getDate() - 1);
+  const isConsecutive = data.lastDate === yesterday.toDateString();
+  const count = isConsecutive ? data.count + 1 : 1;
+  const best = Math.max(data.best || 0, count);
+  localStorage.setItem('scholr_streak', JSON.stringify({ count, best, lastDate: todayStr }));
+  bonusRenderStreakBadge();
+}
+function bonusRenderStreakBadge(){
+  let badge = g('bonus-streak-badge');
+  const info = bonusStreakInfo();
+  if (!bonusGetUnlocked().streak) { if (badge) badge.remove(); return; }
+  if (!badge) {
+    badge = document.createElement('div');
+    badge.id = 'bonus-streak-badge';
+    badge.className = 'bonus-streak-badge';
+    document.body.appendChild(badge);
+  }
+  badge.innerHTML = `🔥 <span>${info.count} day${info.count===1?'':'s'}</span>`;
+}
+
+/* ---------- Feature: Click sound effects ---------- */
+let _bonusAudioCtx = null;
+function bonusPlayClick(){
+  try {
+    _bonusAudioCtx = _bonusAudioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    const ctx = _bonusAudioCtx;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.value = 720;
+    gain.gain.setValueAtTime(0.08, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.12);
+    osc.connect(gain).connect(ctx.destination);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.12);
+  } catch (_) {}
+}
+
+/* ---------- Feature: Quick Notes widget ---------- */
+function bonusOpenNotes(){
+  if (g('bonus-notes-card')) return;
+  const card = document.createElement('div');
+  card.id = 'bonus-notes-card';
+  card.className = 'bonus-notes-card';
+  card.innerHTML = `
+    <button class="bonus-notes-close" onclick="bonusCloseNotes()">✕</button>
+    <div style="font-weight:700;font-size:12.5px;margin-bottom:8px">🗒️ Quick Notes</div>
+    <textarea id="bonus-notes-area" placeholder="Jot something down…" oninput="bonusSaveNotes()"></textarea>`;
+  document.body.appendChild(card);
+  const area = g('bonus-notes-area');
+  if (area) area.value = localStorage.getItem('scholr_quicknote') || '';
+}
+function bonusCloseNotes(){
+  const card = g('bonus-notes-card');
+  if (card) card.remove();
+}
+function bonusSaveNotes(){
+  const area = g('bonus-notes-area');
+  if (area) localStorage.setItem('scholr_quicknote', area.value);
+}
+
 function bonusApplyEffects(flags){
-  document.documentElement.classList.toggle('bonus-rainbow-mode', !!flags.rainbow);
-  document.documentElement.classList.toggle('bonus-nightowl', !!flags.nightowl);
-  document.documentElement.classList.toggle('bonus-gold-mode', !!flags.gold);
-  document.documentElement.classList.toggle('bonus-turbo-mode', !!flags.turbo);
-  document.documentElement.classList.toggle('bonus-zen-mode', !!flags.zen);
+  bonusRenderStreakBadge();
+  if (flags.streak) bonusStreakCheck();
 }
 
 function bonusFireConfetti(){
@@ -9059,7 +9296,7 @@ function bonusFireConfetti(){
   }
 }
 
-// Ripple effect for any element with .bonus-ripple
+// Ripple effect for any element with .bonus-ripple (also plays a click sound when unlocked)
 document.addEventListener('click', (e) => {
   const el = e.target.closest && e.target.closest('.bonus-ripple');
   if (!el) return;
@@ -9072,6 +9309,7 @@ document.addEventListener('click', (e) => {
   fx.style.top = (e.clientY - rect.top - size / 2) + 'px';
   el.appendChild(fx);
   setTimeout(() => fx.remove(), 500);
+  if (bonusGetUnlocked().sound) bonusPlayClick();
 });
 
 const BONUS_HTML = `
@@ -9091,7 +9329,7 @@ function bonusEnsureDefault(){
   const flags = bonusGetUnlocked();
   if (!flags.starter) {
     flags.starter = true;
-    ['confetti','rainbow','nightowl','gold','turbo','zen'].forEach(f => flags[f] = true);
+    ['confetti','focus','streak','sound','notes'].forEach(f => flags[f] = true);
     bonusSetUnlocked(flags);
   }
 }
