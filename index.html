@@ -9038,6 +9038,20 @@ function bonusResetLastCode(){
   bonusRenderUnlocked();
 }
 
+// One press: wipes ALL redeemed codes (including admin) back to just the
+// default STR2030 starter set.
+function bonusResetAll(){
+  if (!confirm('Reset all bonus codes back to default? This removes admin access and every unlocked extra.')) return;
+  const flags = { starter: true };
+  BONUS_STARTER_FLAGS.forEach(f => flags[f] = true);
+  bonusSetUnlocked(flags);
+  localStorage.removeItem('scholr_bonus_last_code');
+  bonusApplyEffects(flags);
+  bonusRenderUnlocked();
+  const msg = g('bonus-code-msg');
+  if (msg) { msg.textContent = '✅ Reset to default (STR2030 only)'; msg.className = 'bonus-codes-msg ok bonus-check-pop'; }
+}
+
 function bonusRenderUnlocked(){
   const listEl = g('bonus-unlocked-list');
   const adminSlot = g('bonus-admin-slot');
@@ -9396,6 +9410,7 @@ const BONUS_HTML = `
   </div>
   <div class="bonus-codes-row">
     <button class="bonus-ripple" style="flex:1;background:var(--s2);color:var(--ink3);border:1px solid var(--bor)" onclick="bonusResetLastCode()">↺ Reset previous code</button>
+    <button class="bonus-ripple" style="flex:1;background:var(--s2);color:#dc2626;border:1px solid #dc2626" onclick="bonusResetAll()">⚠️ Reset ALL to default</button>
   </div>
   <div id="bonus-code-msg" class="bonus-codes-msg"></div>
   <div id="bonus-unlocked-list" class="bonus-unlocked-list"></div>
