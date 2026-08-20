@@ -995,6 +995,14 @@ img{max-width:100%}
 .notif-badge{position:absolute;top:-1px;right:-1px;background:var(--red);color:#fff;font-size:8.5px;font-weight:800;padding:1.5px 4px;border-radius:99px;min-width:15px;text-align:center;line-height:1.4;pointer-events:none}
 
 /* ══════════════════════ RESPONSIVE ══════════════════════ */
+
+/* Dark-theme contrast fix: noir's --ac is near-white, so hardcoded white text
+   on accent-colored elements was unreadable. Force dark text there instead. */
+[data-t="noir"] .bp,[data-t="noir"] .tb.on,[data-t="noir"] .s-day.done,
+[data-t="noir"] .cal-cell.today .cal-dn,[data-t="noir"] .cal-week-dh.today .wdd,
+[data-t="noir"] .cal-mini-d.today,[data-t="noir"] .calc-kb.eq,
+[data-t="noir"] .ai-msg-user,[data-t="noir"] .ai-tool-btn,[data-t="noir"] .ai-tab.active,
+[data-t="noir"] .bonus-codes-row button{color:#111 !important}
 @media(max-width:700px){.d-grid{grid-template-columns:1fr}.kanban{grid-template-columns:1fr}.stat-grid{grid-template-columns:1fr 1fr}.wp-board{grid-template-columns:repeat(2,1fr)}}
 </style>
 <style>
@@ -7886,6 +7894,49 @@ function examIsoDate(d){ return d.getFullYear()+'-'+String(d.getMonth()+1).padSt
 function examDayLabel(d){ return d.toLocaleDateString('en-CA',{weekday:'short',month:'short',day:'numeric'}); }
 function examMkTask(text,kind){ return { id:'t'+Date.now()+Math.random().toString(36).slice(2,7), text, kind:kind||'topic', done:false }; }
 
+// Builds just the day scaffolding (dates/labels, which days are "review" days)
+// for an exam study plan — pure calendar math, no content. AI fills in the
+// actual task text; this keeps the exam date logic reliable either way.
+function examBuildDayScaffold(examDateStr, studyWindow){
+  const exam = new Date(examDateStr+'T00:00:00');
+  const today = new Date(); today.setHours(0,0,0,0);
+  const allDays = [];
+  const cursor = new Date(today);
+  while (cursor < exam) { allDays.push(new Date(cursor)); cursor.setDate(cursor.getDate()+1); }
+  if (!allDays.length) allDays.push(new Date(today));
+  const MAXW = studyWindow>0 ? studyWindow : 14;
+  const days = allDays.length > MAXW ? allDays.slice(-MAXW) : allDays;
+  const reviewDayCount = days.length >= 3 ? 1 : 0;
+  return days.map((d,i) => ({
+    date: examIsoDate(d), label: examDayLabel(d),
+    isReview: i >= days.length - reviewDayCount
+  }));
+}
+
+// Asks the AI backend to write the actual day-by-day task content for an
+// exam study plan. Falls back to the local template generator (genExamStudyPlan)
+// if the AI call fails or is unavailable, so exam saving never breaks.
+async function examGenerateAiPlan(topics, examDateStr, studyWindow, examTitle){
+  const scaffold = examBuildDayScaffold(examDateStr, studyWindow);
+  try {
+    const data = await aiPost('/api/examplan', {
+      topics, examTitle: examTitle || 'this exam', dayCount: scaffold.length
+    });
+    const aiDays = Array.isArray(data.days) ? data.days : null;
+    if (!aiDays || aiDays.length !== scaffold.length) throw new Error('Unexpected AI response shape');
+
+    return scaffold.map((day, i) => {
+      const tasks = (aiDays[i] || []).filter(t => typeof t === 'string' && t.trim()).slice(0, 3)
+        .map(t => examMkTask(t.trim(), day.isReview ? 'practice' : 'topic'));
+      if (!tasks.length) tasks.push(examMkTask('Review & practice', 'practice'));
+      return { date: day.date, label: day.label, tasks };
+    });
+  } catch (err) {
+    console.error('AI exam plan failed, using local generator:', err);
+    return genExamStudyPlan(topics, examDateStr, studyWindow);
+  }
+}
+
 // Builds a day-by-day study plan for the days leading up to the exam,
 // spreading the given topics across the available days (or generic
 // review tasks if no topics were given), with the day(s) closest to
@@ -7908,8 +7959,10 @@ function genExamStudyPlan(topics, examDateStr, studyWindow){
   const byDate = Object.fromEntries(plan.map(p=>[p.date, p]));
 
   if (!topics.length) {
+    const genericTasks = ['Practice problems & self-quiz','Review weak areas & flashcards','Timed practice test','Summarize key concepts','Redo missed problems'];
     topicDays.forEach((d,i) => {
-      byDate[examIsoDate(d)].tasks.push(examMkTask(i===0?'Review notes & course material':'Practice problems & self-quiz','practice'));
+      const text = i===0 ? 'Review notes & course material' : genericTasks[(i-1) % genericTasks.length];
+      byDate[examIsoDate(d)].tasks.push(examMkTask(text,'practice'));
     });
   } else if (topics.length <= topicDays.length) {
     const perDay = topicDays.length / topics.length;
@@ -7917,9 +7970,11 @@ function genExamStudyPlan(topics, examDateStr, studyWindow){
       const dayIdx = Math.min(topicDays.length-1, Math.floor(i*perDay));
       byDate[examIsoDate(topicDays[dayIdx])].tasks.push(examMkTask(t,'topic'));
     });
+    const genericTasks2 = ['Practice problems & self-quiz','Review weak areas & flashcards','Timed practice test'];
+    let gi = 0;
     topicDays.forEach(d => {
       const p = byDate[examIsoDate(d)];
-      if (!p.tasks.length) p.tasks.push(examMkTask('Practice problems & self-quiz','practice'));
+      if (!p.tasks.length) { p.tasks.push(examMkTask(genericTasks2[gi % genericTasks2.length],'practice')); gi++; }
     });
   } else {
     topics.forEach((t,i) => {
@@ -7978,7 +8033,7 @@ function examOpenEdit(id){
   setSel('exam-pri', String(ex.pri??1));
   g('exam-window').value = ex.window||14;
 }
-function examSave(){
+async function examSave(){
   const course = g('exam-co')?.value;
   const title = g('exam-title')?.value.trim();
   const date = g('exam-date')?.value;
@@ -7990,7 +8045,13 @@ function examSave(){
   const topics = (g('exam-topics')?.value||'').split('\n').map(s=>s.trim()).filter(Boolean);
   const c = DB.courses.find(c=>c.name===course);
   const window = Math.max(1, Math.min(30, +g('exam-window')?.value || 14));
-  const plan = genExamStudyPlan(topics, date, window);
+
+  const saveBtn = document.querySelector('.mdl-acts .btn.bp[onclick="examSave()"]');
+  const prevLabel = saveBtn ? saveBtn.textContent : '';
+  if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = '✨ AI is planning…'; }
+  const plan = await examGenerateAiPlan(topics, date, window, title);
+  if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = prevLabel; }
+
   const old = existingIdx>=0 ? DB.exams[existingIdx] : null;
   if (old) examMergePlanProgress(old.plan, plan);
   const exam = {
@@ -8814,20 +8875,20 @@ async function runAiQuiz(){
      Settings panel if it finds a common settings container
      (#settings, .settings, [id*="settings"]) — otherwise it shows
      as its own small floating card, bottom-left, so nothing breaks.
-   - Redeeming a code unlocks a feature flag in localStorage.
-   - Codes now unlock real functionality instead of pure cosmetic
-     reskins — each one turns on a small working tool:
-       !BSHUI596!  -> hidden Admin Panel (view/export/import/reset
-                       localStorage, live app stats, debug mode)
-       STR2030     -> Starter Pack (unlocks the base feature set)
-       STR-PARTY   -> celebratory confetti burst
-       STR-FOCUS   -> working Pomodoro focus timer widget
-       STR-STREAK  -> daily streak tracker (counts consecutive days)
-       STR-SOUND   -> real click sound effects (Web Audio, no assets)
-       STR-NOTES   -> floating quick-notes widget that saves as you type
+   - Redeeming a code unlocks a real feature flag in localStorage.
+   - Built-in codes (edit BONUS_CODES below to change these):
+       !BSHUI596!        -> Admin Panel (real DB stats, quick-nav,
+                             clear notes/HW, export/clear all data)
+       STR2030           -> Starter Pack, unlocked by default
+       STR-TOOLS-EXTRA   -> 3 extra AI tabs: Translate/Brainstorm/Citation
+       STR-FOCUS-TIMER   -> Pomodoro focus timer widget
+       STR-STREAK-DAYS   -> daily streak tracker badge
+       STR-AUTO-SPEAK    -> auto-reads AI replies aloud
+       STR-QUICK-EXPORT  -> one-click "export all data" button
+       STR-QUICK-NAV     -> quick-jump nav bar to any page
    - Adds reusable animation classes (ripple buttons, card lift,
-     shimmer skeleton, staggered fade-in lists, confetti, toast pop)
-     you can reuse anywhere else in Scholr too.
+     shimmer skeleton, staggered fade-in lists) you can reuse
+     anywhere else in Scholr too.
 ══════════════════════════════════════════════ */
 
 const BONUS_CSS = `
@@ -8837,6 +8898,7 @@ const BONUS_CSS = `
 @keyframes bonusShimmer{0%{background-position:-200px 0}100%{background-position:200px 0}}
 @keyframes bonusRipple{to{transform:scale(3);opacity:0}}
 @keyframes bonusConfettiFall{to{transform:translateY(110vh) rotate(540deg);opacity:0}}
+@keyframes bonusRainbowShift{0%{filter:hue-rotate(0deg)}100%{filter:hue-rotate(360deg)}}
 @keyframes bonusCheckPop{0%{transform:scale(0) rotate(-20deg)}70%{transform:scale(1.15) rotate(4deg)}100%{transform:scale(1) rotate(0)}}
 
 .bonus-stagger > *{animation:bonusFadeUp .35s ease both}
@@ -8860,12 +8922,6 @@ const BONUS_CSS = `
 }
 
 .bonus-check-pop{animation:bonusCheckPop .4s cubic-bezier(.34,1.56,.64,1) both}
-
-.bonus-confetti-piece{
-  position:fixed;top:-20px;z-index:99999;pointer-events:none;border-radius:2px;
-  animation:bonusConfettiFall linear forwards;
-}
-
 /* ---- Bonus Codes panel ---- */
 .bonus-codes-wrap{padding:14px;display:flex;flex-direction:column;gap:10px;animation:bonusFadeUp .3s ease both}
 .bonus-codes-title{font-weight:700;font-size:13.5px;display:flex;align-items:center;gap:6px}
@@ -8903,11 +8959,6 @@ const BONUS_CSS = `
   padding:6px 10px;font-size:11.5px;cursor:pointer;transition:all .15s;
 }
 .bonus-admin-btns button:hover{border-color:var(--ac);color:var(--ac);transform:translateY(-1px)}
-.bonus-admin-btns button.danger:hover{border-color:#dc2626;color:#dc2626}
-.bonus-admin-keys{max-height:160px;overflow-y:auto;border:1px solid var(--bor);border-radius:8px;background:var(--bg)}
-.bonus-admin-keys table{width:100%;border-collapse:collapse;font-size:11px}
-.bonus-admin-keys td{padding:4px 8px;border-bottom:1px solid var(--bor);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:140px}
-.bonus-admin-keys td:last-child{text-align:right;color:var(--ink4);white-space:nowrap}
 
 .bonus-floating-card{
   position:fixed;left:20px;bottom:20px;z-index:7500;width:280px;max-width:calc(100vw - 40px);
@@ -8917,50 +8968,23 @@ const BONUS_CSS = `
 .bonus-floating-card summary{cursor:pointer;padding:10px 14px;font-weight:700;font-size:12.5px;list-style:none;
   display:flex;align-items:center;gap:6px}
 .bonus-floating-card summary::-webkit-details-marker{display:none}
-
-/* ---- Feature widgets (replace old pure-theme flags) ---- */
-.bonus-streak-badge{
-  position:fixed;right:20px;bottom:20px;z-index:7400;display:flex;align-items:center;gap:6px;
-  background:var(--sur);border:1px solid var(--bor);border-radius:99px;padding:7px 13px;
-  font-size:12px;font-weight:700;box-shadow:var(--sh2);animation:bonusPop .3s cubic-bezier(.34,1.56,.64,1) both;
-}
-
-.bonus-timer-card{
-  position:fixed;right:20px;bottom:20px;z-index:7600;width:220px;background:var(--sur);
-  border:1px solid var(--bor);border-radius:14px;box-shadow:var(--sh3);padding:14px;
-  animation:bonusPop .3s cubic-bezier(.34,1.56,.64,1) both;
-}
-.bonus-timer-mode{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--ac)}
-.bonus-timer-clock{font-family:var(--font-m);font-size:32px;font-weight:700;margin:8px 0;text-align:center}
-.bonus-timer-btns{display:flex;gap:6px}
-.bonus-timer-btns button{
-  flex:1;border:1px solid var(--bor);background:var(--s2);color:var(--ink2);border-radius:8px;
-  padding:6px 0;font-size:11.5px;cursor:pointer;
-}
-.bonus-timer-btns button:hover{border-color:var(--ac);color:var(--ac)}
-.bonus-timer-close{position:absolute;top:8px;right:10px;background:none;border:none;color:var(--ink4);font-size:13px;cursor:pointer}
-
-.bonus-notes-card{
-  position:fixed;right:20px;bottom:20px;z-index:7600;width:230px;background:var(--sur);
-  border:1px solid var(--bor);border-radius:14px;box-shadow:var(--sh3);padding:12px;
-  animation:bonusPop .3s cubic-bezier(.34,1.56,.64,1) both;
-}
-.bonus-notes-card textarea{
-  width:100%;min-height:120px;border:1px solid var(--bor);border-radius:8px;padding:8px;
-  font-size:12px;font-family:var(--font);resize:vertical;background:var(--bg);color:var(--ink);outline:none;
-}
-.bonus-notes-close{position:absolute;top:8px;right:10px;background:none;border:none;color:var(--ink4);font-size:13px;cursor:pointer}
 `;
 
 const BONUS_CODES = {
-  '!BSHUI596!': { flag: 'admin',   label: '🛠️ Admin Panel' },
-  STR2030:      { flag: 'starter', label: '⭐ Starter Pack (unlocked by default)' },
-  'STR-PARTY':  { flag: 'confetti',label: '🎉 Confetti mode' },
-  'STR-FOCUS':  { flag: 'focus',   label: '⏱️ Focus Timer (Pomodoro)' },
-  'STR-STREAK': { flag: 'streak',  label: '🔥 Daily Streak tracker' },
-  'STR-SOUND':  { flag: 'sound',   label: '🔊 Click sound effects' },
-  'STR-NOTES':  { flag: 'notes',   label: '🗒️ Quick Notes widget' },
+  '!BSHUI596!':       { flag: 'admin',       label: '🛠️ Admin Panel (full access)' },
+  'BSHUI596':         { flag: 'admin',       label: '🛠️ Admin Panel (full access)' },
+  'STR-TOOLS-EXTRA':  { flag: 'toolsExtra',  label: '🧰 3 extra AI tabs: Translate, Brainstorm, Citation' },
+  'STR-FOCUS-TIMER':  { flag: 'focus',       label: '⏱️ Pomodoro focus timer widget' },
+  'STR-STREAK-DAYS':  { flag: 'streak',      label: '🔥 Daily streak tracker' },
+  'STR-AUTO-SPEAK':   { flag: 'autospeak',   label: '🔊 Auto-read AI replies aloud' },
+  'STR-QUICK-EXPORT': { flag: 'quickexport', label: '📦 One-click export all your data' },
+  'STR-QUICK-NAV':    { flag: 'quicknav',    label: '🧭 Quick-jump nav (press any page instantly)' },
+  'STR-TASK-SORT':    { flag: 'tasksort',    label: '📊 Smart homework sort (auto priority by due date)' },
+  'STR-NOTE-PIN':     { flag: 'notepin',     label: '📌 Pin important notes to the top' },
 };
+
+// STR2030 is the default code — auto-applied for everyone, not shown as a redeemable entry.
+const BONUS_STARTER_FLAGS = ['toolsExtra','focus','streak','autospeak','quickexport','quicknav','tasksort','notepin'];
 
 function bonusGetUnlocked(){
   try { return JSON.parse(localStorage.getItem('scholr_bonus_flags') || '{}'); }
@@ -8975,7 +8999,7 @@ function bonusRedeemCode(){
   const msg = g('bonus-code-msg');
   if (!input) return;
   const code = input.value.trim().toUpperCase();
-  const entry = BONUS_CODES[code] || BONUS_CODES[input.value.trim()]; // admin code keeps its exact-case symbols
+  const entry = BONUS_CODES[code];
   const flags = bonusGetUnlocked();
 
   if (!code) { msg.textContent = 'Enter a code first.'; msg.className = 'bonus-codes-msg err'; return; }
@@ -8983,16 +9007,35 @@ function bonusRedeemCode(){
   if (flags[entry.flag]) { msg.textContent = 'Already unlocked!'; msg.className = 'bonus-codes-msg err'; return; }
 
   flags[entry.flag] = true;
-  if (entry.flag === 'starter') {
-    ['confetti','focus','streak','sound','notes'].forEach(f => flags[f] = true);
-  }
+  if (entry.flag === 'starter') BONUS_STARTER_FLAGS.forEach(f => flags[f] = true);
   bonusSetUnlocked(flags);
+  localStorage.setItem('scholr_bonus_last_code', code);
+
   msg.textContent = '✅ Unlocked: ' + entry.label;
   msg.className = 'bonus-codes-msg ok bonus-check-pop';
   input.value = '';
   bonusApplyEffects(flags);
   bonusRenderUnlocked();
-  if (entry.flag === 'confetti' || flags.confetti) bonusFireConfetti();
+}
+
+// Removes only the most recently redeemed code (does not touch admin unless
+// admin was the last one redeemed) — a quick "undo my last code" action.
+function bonusResetLastCode(){
+  const lastCode = localStorage.getItem('scholr_bonus_last_code');
+  const msg = g('bonus-code-msg');
+  if (!lastCode || !BONUS_CODES[lastCode]) {
+    if (msg) { msg.textContent = 'No previous code to reset.'; msg.className = 'bonus-codes-msg err'; }
+    return;
+  }
+  const flags = bonusGetUnlocked();
+  const entry = BONUS_CODES[lastCode];
+  delete flags[entry.flag];
+  if (entry.flag === 'starter') BONUS_STARTER_FLAGS.forEach(f => delete flags[f]);
+  bonusSetUnlocked(flags);
+  localStorage.removeItem('scholr_bonus_last_code');
+  if (msg) { msg.textContent = '↺ Reset: ' + entry.label; msg.className = 'bonus-codes-msg ok'; }
+  bonusApplyEffects(flags);
+  bonusRenderUnlocked();
 }
 
 function bonusRenderUnlocked(){
@@ -9008,18 +9051,15 @@ function bonusRenderUnlocked(){
     items.forEach(([code, v]) => {
       const row = document.createElement('div');
       row.className = 'bonus-unlocked-item bonus-check-pop';
-      let extra = '';
-      if (v.flag === 'focus') extra = `<button class="bonus-ripple" style="border:1px solid var(--bor);background:var(--bg);border-radius:6px;padding:3px 8px;font-size:10.5px;cursor:pointer" onclick="bonusOpenTimer()">Open</button>`;
-      if (v.flag === 'notes') extra = `<button class="bonus-ripple" style="border:1px solid var(--bor);background:var(--bg);border-radius:6px;padding:3px 8px;font-size:10.5px;cursor:pointer" onclick="bonusOpenNotes()">Open</button>`;
-      if (v.flag === 'streak') extra = `<span style="color:var(--ac);font-weight:700">${bonusStreakDays()}d</span>`;
-      row.innerHTML = `<span>${v.label}</span><span style="display:flex;align-items:center;gap:6px"><span style="color:var(--ink4);font-size:10.5px">${code}</span>${extra}</span>`;
+      row.innerHTML = `<span>${v.label}</span><span style="color:var(--ink4);font-size:10.5px">${code}</span>`;
       listEl.appendChild(row);
     });
   }
   if (adminSlot) adminSlot.innerHTML = flags.admin ? bonusAdminPanelHtml() : '';
+  bonusApplyFeatureHooks(flags);
 }
 
-/* ---------- Admin Panel ---------- */
+// ---------- Admin Panel: real access to real app data ----------
 function bonusAdminPanelHtml(){
   let keyCount = 0, approxBytes = 0;
   try {
@@ -9029,28 +9069,38 @@ function bonusAdminPanelHtml(){
       approxBytes += (k?.length || 0) + (localStorage.getItem(k)?.length || 0);
     }
   } catch (_) {}
-  const flags = bonusGetUnlocked();
-  const unlockedCount = Object.values(flags).filter(Boolean).length;
-  const streak = bonusStreakInfo();
+
+  const noteCount = (typeof DB !== 'undefined' && Array.isArray(DB.notes)) ? DB.notes.length : '—';
+  const courseCount = (typeof DB !== 'undefined' && Array.isArray(DB.courses)) ? DB.courses.length : '—';
+  const hwCount = (typeof DB !== 'undefined' && Array.isArray(DB.hw)) ? DB.hw.length : '—';
+
+  const navButtons = Object.keys(typeof PG !== 'undefined' ? PG : {})
+    .map(id => `<button onclick="go('${id}')">${(typeof PG!=='undefined'&&PG[id])||id}</button>`)
+    .join('');
+
   return `
     <div class="bonus-admin-panel bonus-check-pop">
       <div style="font-weight:700;font-size:12.5px">🛠️ Admin Panel</div>
+
+      <div class="bonus-admin-stat"><span>Notes</span><span>${noteCount}</span></div>
+      <div class="bonus-admin-stat"><span>Courses</span><span>${courseCount}</span></div>
+      <div class="bonus-admin-stat"><span>Homework items</span><span>${hwCount}</span></div>
       <div class="bonus-admin-stat"><span>localStorage keys</span><span>${keyCount}</span></div>
       <div class="bonus-admin-stat"><span>Approx. storage used</span><span>${(approxBytes/1024).toFixed(1)} KB</span></div>
-      <div class="bonus-admin-stat"><span>Bonus features unlocked</span><span>${unlockedCount}</span></div>
-      <div class="bonus-admin-stat"><span>Current streak</span><span>${streak.count} day${streak.count===1?'':'s'} (best ${streak.best})</span></div>
       <div class="bonus-admin-stat"><span>Debug mode</span><span id="bonus-debug-state">${localStorage.getItem('scholr_debug') === '1' ? 'ON' : 'OFF'}</span></div>
+
+      <div style="font-size:11px;color:var(--ink4);margin-top:4px">Jump to any page:</div>
+      <div class="bonus-admin-btns">${navButtons}</div>
+
+      <div style="font-size:11px;color:var(--ink4);margin-top:4px">Actions:</div>
       <div class="bonus-admin-btns">
         <button onclick="bonusToggleDebug()">Toggle debug mode</button>
-        <button onclick="bonusToggleKeysView()">View storage keys</button>
-        <button onclick="bonusExportData()">Export data (JSON)</button>
-        <button onclick="bonusCopyData()">Copy data to clipboard</button>
-        <button onclick="bonusImportData()">Import data (JSON)</button>
-        <button onclick="bonusResetAnnouncements()">Reset announcements</button>
-        <button onclick="bonusResetBonusFeatures()">Reset bonus features only</button>
-        <button class="danger" onclick="bonusConfirmClear()">⚠️ Clear all local data</button>
+        <button onclick="bonusExportData()">Export all data (JSON)</button>
+        <button onclick="bonusUnlockEverything()">Unlock every bonus feature</button>
+        <button onclick="bonusAdminClearNotes()">Clear all notes</button>
+        <button onclick="bonusAdminClearHW()">Clear all homework</button>
+        <button onclick="bonusConfirmClear()">⚠️ Clear ALL local data</button>
       </div>
-      <div id="bonus-admin-keys" class="bonus-admin-keys" style="display:none"></div>
     </div>`;
 }
 
@@ -9061,18 +9111,33 @@ function bonusToggleDebug(){
   if (el) el.textContent = on ? 'OFF' : 'ON';
 }
 
-function bonusToggleKeysView(){
-  const box = g('bonus-admin-keys');
-  if (!box) return;
-  if (box.style.display !== 'none') { box.style.display = 'none'; return; }
-  let rows = '';
-  for (let i = 0; i < localStorage.length; i++) {
-    const k = localStorage.key(i);
-    const v = localStorage.getItem(k) || '';
-    rows += `<tr><td title="${k}">${k}</td><td>${(v.length/1024).toFixed(2)} KB</td></tr>`;
-  }
-  box.innerHTML = `<table>${rows || '<tr><td colspan="2">No keys stored.</td></tr>'}</table>`;
-  box.style.display = 'block';
+function bonusUnlockEverything(){
+  const flags = bonusGetUnlocked();
+  Object.values(BONUS_CODES).forEach(v => flags[v.flag] = true);
+  bonusSetUnlocked(flags);
+  bonusApplyEffects(flags);
+  bonusRenderUnlocked();
+  if (typeof toast === 'function') toast('✅ All bonus features unlocked');
+}
+
+function bonusAdminClearNotes(){
+  if (typeof DB === 'undefined') return;
+  if (!confirm('Delete ALL notes? This cannot be undone.')) return;
+  DB.notes = []; noteId = null;
+  if (typeof save === 'function') save();
+  if (typeof renderDashboard === 'function') renderDashboard();
+  if (typeof toast === 'function') toast('All notes cleared');
+  bonusRenderUnlocked();
+}
+
+function bonusAdminClearHW(){
+  if (typeof DB === 'undefined') return;
+  if (!confirm('Delete ALL homework items? This cannot be undone.')) return;
+  DB.hw = [];
+  if (typeof save === 'function') save();
+  if (typeof renderDashboard === 'function') renderDashboard();
+  if (typeof toast === 'function') toast('All homework cleared');
+  bonusRenderUnlocked();
 }
 
 function bonusExportData(){
@@ -9089,214 +9154,224 @@ function bonusExportData(){
   URL.revokeObjectURL(a.href);
 }
 
-function bonusCopyData(){
-  const data = {};
-  for (let i = 0; i < localStorage.length; i++) {
-    const k = localStorage.key(i);
-    data[k] = localStorage.getItem(k);
-  }
-  const text = JSON.stringify(data, null, 2);
-  const msg = g('bonus-code-msg');
-  const done = () => { if (msg) { msg.textContent = '📋 Data copied to clipboard.'; msg.className = 'bonus-codes-msg ok'; } };
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(text).then(done).catch(() => {
-      if (msg) { msg.textContent = 'Could not copy — try Export instead.'; msg.className = 'bonus-codes-msg err'; }
-    });
-  } else {
-    if (msg) { msg.textContent = 'Clipboard not available — try Export instead.'; msg.className = 'bonus-codes-msg err'; }
-  }
-}
-
-function bonusImportData(){
-  const input = document.createElement('input');
-  input.type = 'file';
-  input.accept = 'application/json';
-  input.onchange = () => {
-    const file = input.files && input.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      try {
-        const data = JSON.parse(reader.result);
-        if (!confirm('Import this JSON into local storage? Existing keys with the same name will be overwritten.')) return;
-        Object.keys(data).forEach(k => localStorage.setItem(k, data[k]));
-        location.reload();
-      } catch (_) {
-        alert('That file is not valid JSON.');
-      }
-    };
-    reader.readAsText(file);
-  };
-  input.click();
-}
-
-function bonusResetAnnouncements(){
-  localStorage.removeItem('scholr_announce_seen');
-  const msg = g('bonus-code-msg');
-  if (msg) { msg.textContent = '🔁 Announcements will show again on next load.'; msg.className = 'bonus-codes-msg ok'; }
-}
-
-function bonusResetBonusFeatures(){
-  if (!confirm('This clears all redeemed bonus codes and feature data (streak, notes, timer settings). Continue?')) return;
-  ['scholr_bonus_flags','scholr_streak','scholr_quicknote'].forEach(k => localStorage.removeItem(k));
-  location.reload();
-}
-
 function bonusConfirmClear(){
   if (!confirm('This will erase ALL locally saved Scholr data on this device. This cannot be undone. Continue?')) return;
   localStorage.clear();
   location.reload();
 }
 
-/* ---------- Feature: Focus Timer (Pomodoro) ---------- */
-let _bonusTimerState = { seconds: 25*60, mode: 'Focus', running: false, handle: null };
+// ---------- Apply genuine (non-theme) feature unlocks ----------
+function bonusApplyEffects(flags){
+  bonusApplyFeatureHooks(flags);
+}
 
-function bonusOpenTimer(){
-  if (g('bonus-timer-card')) return;
-  const card = document.createElement('div');
-  card.id = 'bonus-timer-card';
-  card.className = 'bonus-timer-card';
-  card.innerHTML = `
-    <button class="bonus-timer-close" onclick="bonusCloseTimer()">✕</button>
-    <div class="bonus-timer-mode" id="bonus-timer-mode">Focus</div>
-    <div class="bonus-timer-clock" id="bonus-timer-clock">25:00</div>
-    <div class="bonus-timer-btns">
-      <button class="bonus-ripple" id="bonus-timer-toggle" onclick="bonusToggleTimer()">Start</button>
-      <button class="bonus-ripple" onclick="bonusResetTimer()">Reset</button>
-    </div>`;
-  document.body.appendChild(card);
-  bonusRenderTimer();
-}
-function bonusCloseTimer(){
-  const card = g('bonus-timer-card');
-  if (card) card.remove();
-}
-function bonusRenderTimer(){
-  const m = Math.floor(_bonusTimerState.seconds / 60).toString().padStart(2,'0');
-  const s = (_bonusTimerState.seconds % 60).toString().padStart(2,'0');
-  const clock = g('bonus-timer-clock'); if (clock) clock.textContent = `${m}:${s}`;
-  const mode = g('bonus-timer-mode'); if (mode) mode.textContent = _bonusTimerState.mode;
-  const toggle = g('bonus-timer-toggle'); if (toggle) toggle.textContent = _bonusTimerState.running ? 'Pause' : 'Start';
-}
-function bonusToggleTimer(){
-  if (_bonusTimerState.running) {
-    clearInterval(_bonusTimerState.handle);
-    _bonusTimerState.running = false;
-  } else {
-    _bonusTimerState.running = true;
-    _bonusTimerState.handle = setInterval(() => {
-      _bonusTimerState.seconds--;
-      if (_bonusTimerState.seconds <= 0) {
-        const wasFocus = _bonusTimerState.mode === 'Focus';
-        _bonusTimerState.mode = wasFocus ? 'Break' : 'Focus';
-        _bonusTimerState.seconds = wasFocus ? 5*60 : 25*60;
-        if (window.aiSpeak) { try { aiSpeak(wasFocus ? 'Time for a break.' : 'Back to focus.'); } catch(_){} }
-      }
-      bonusRenderTimer();
-    }, 1000);
+function bonusApplyFeatureHooks(flags){
+  // Extra AI tabs: Translate / Brainstorm / Citation
+  if (flags.toolsExtra && !g('ai-tab-extra-added')) {
+    const tabRow = g('ai-tab-row');
+    const body = g('ai-chat-panel');
+    if (tabRow && body) {
+      const marker = document.createElement('span');
+      marker.id = 'ai-tab-extra-added';
+      marker.style.display = 'none';
+      tabRow.appendChild(marker);
+
+      [['translate','🌐 Translate'], ['brainstorm','💭 Brainstorm'], ['citation','📚 Citation']].forEach(([key,label]) => {
+        const tabBtn = document.createElement('button');
+        tabBtn.className = 'ai-tab bonus-ripple';
+        tabBtn.dataset.tab = key;
+        tabBtn.textContent = label;
+        tabRow.appendChild(tabBtn);
+
+        const pane = document.createElement('div');
+        pane.className = 'ai-body hidden';
+        pane.id = 'ai-pane-' + key;
+        if (key === 'translate') {
+          pane.innerHTML = `<div class="ai-tool-pane">
+            <textarea id="ai-translate-input" placeholder="Text to translate…"></textarea>
+            <div class="ai-tool-row">
+              <select id="ai-translate-lang"><option>Spanish</option><option>French</option><option>German</option><option>Mandarin Chinese</option><option>Japanese</option></select>
+              <button class="ai-tool-btn bonus-ripple" onclick="runAiExtraTool('translate')">Translate</button>
+            </div>
+            <div id="ai-translate-output" class="ai-tool-output" style="display:none"></div>
+          </div>`;
+        } else if (key === 'brainstorm') {
+          pane.innerHTML = `<div class="ai-tool-pane">
+            <textarea id="ai-brainstorm-input" placeholder="Topic to brainstorm…" style="min-height:60px"></textarea>
+            <div class="ai-tool-row"><button class="ai-tool-btn bonus-ripple" onclick="runAiExtraTool('brainstorm')">Brainstorm</button></div>
+            <div id="ai-brainstorm-output" style="display:flex;flex-direction:column;gap:6px"></div>
+          </div>`;
+        } else {
+          pane.innerHTML = `<div class="ai-tool-pane">
+            <textarea id="ai-citation-input" placeholder="Paste source info (title, author, URL, etc.)…" style="min-height:60px"></textarea>
+            <div class="ai-tool-row">
+              <select id="ai-citation-style"><option>APA</option><option>MLA</option><option>Chicago</option></select>
+              <button class="ai-tool-btn bonus-ripple" onclick="runAiExtraTool('citation')">Generate Citation</button>
+            </div>
+            <div id="ai-citation-output" class="ai-tool-output" style="display:none"></div>
+          </div>`;
+        }
+        body.appendChild(pane);
+      });
+    }
   }
-  bonusRenderTimer();
-}
-function bonusResetTimer(){
-  clearInterval(_bonusTimerState.handle);
-  _bonusTimerState = { seconds: 25*60, mode: 'Focus', running: false, handle: null };
-  bonusRenderTimer();
+
+  // Focus timer widget
+  if (flags.focus && !g('bonus-focus-widget')) bonusMountFocusTimer();
+  if (!flags.focus) { const w = g('bonus-focus-widget'); if (w) w.remove(); }
+
+  // Daily streak tracker
+  if (flags.streak) bonusUpdateStreak();
+
+  // Quick-export button floats near the FAB if unlocked
+  if (flags.quickexport && !g('bonus-quickexport-btn')) {
+    const btn = document.createElement('button');
+    btn.id = 'bonus-quickexport-btn';
+    btn.className = 'bonus-floating-card bonus-ripple';
+    btn.style.cssText = 'right:90px;left:auto;bottom:22px;width:auto;padding:10px 14px;cursor:pointer;font-size:12px;font-weight:600;border:1px solid var(--bor)';
+    btn.textContent = '📦 Export data';
+    btn.onclick = bonusExportData;
+    document.body.appendChild(btn);
+  }
+  if (!flags.quickexport) { const b = g('bonus-quickexport-btn'); if (b) b.remove(); }
+
+  // Quick-nav mini command bar
+  if (flags.quicknav && !g('bonus-quicknav-bar')) bonusMountQuickNav();
+  if (!flags.quicknav) { const bar = g('bonus-quicknav-bar'); if (bar) bar.remove(); }
 }
 
-/* ---------- Feature: Daily Streak tracker ---------- */
-function bonusStreakInfo(){
+async function runAiExtraTool(tool){
+  const outEl = g('ai-' + tool + '-output');
+  const btn = event && event.target;
+  if (tool === 'translate') {
+    const text = g('ai-translate-input').value.trim();
+    if (!text) { outEl.style.display='block'; outEl.textContent='Please enter text first.'; return; }
+    if (btn) btn.disabled = true;
+    outEl.style.display = 'block'; outEl.textContent = 'Translating…';
+    try {
+      const { translated } = await aiPost('/api/translate', { text, targetLanguage: g('ai-translate-lang').value });
+      outEl.textContent = translated;
+    } catch (err) { outEl.textContent = '⚠️ ' + err.message; }
+    finally { if (btn) btn.disabled = false; }
+  } else if (tool === 'brainstorm') {
+    const topic = g('ai-brainstorm-input').value.trim();
+    const wrap = g('ai-brainstorm-output');
+    if (!topic) { wrap.textContent = 'Please enter a topic first.'; return; }
+    if (btn) btn.disabled = true;
+    wrap.innerHTML = '<div class="ai-tool-output">Brainstorming…</div>';
+    try {
+      const { ideas } = await aiPost('/api/brainstorm', { topic });
+      wrap.innerHTML = '';
+      (ideas || []).forEach((idea, i) => {
+        const div = document.createElement('div');
+        div.className = 'ai-tool-output bonus-card-hover';
+        div.style.animationDelay = (i * 0.03) + 's';
+        div.textContent = '💡 ' + idea;
+        wrap.appendChild(div);
+      });
+    } catch (err) { wrap.innerHTML = '<div class="ai-tool-output">⚠️ ' + err.message + '</div>'; }
+    finally { if (btn) btn.disabled = false; }
+  } else if (tool === 'citation') {
+    const source = g('ai-citation-input').value.trim();
+    if (!source) { outEl.style.display='block'; outEl.textContent='Please paste source info first.'; return; }
+    if (btn) btn.disabled = true;
+    outEl.style.display = 'block'; outEl.textContent = 'Generating…';
+    try {
+      const { citation } = await aiPost('/api/citation', { source, style: g('ai-citation-style').value });
+      outEl.textContent = citation;
+    } catch (err) { outEl.textContent = '⚠️ ' + err.message; }
+    finally { if (btn) btn.disabled = false; }
+  }
+}
+
+function bonusMountFocusTimer(){
+  const div = document.createElement('div');
+  div.id = 'bonus-focus-widget';
+  div.className = 'bonus-floating-card';
+  div.style.cssText = 'right:20px;left:auto;bottom:160px;padding:12px 14px;width:180px';
+  div.innerHTML = `
+    <div style="font-weight:700;font-size:12px;margin-bottom:6px">⏱️ Focus Timer</div>
+    <div id="bonus-focus-display" style="font-size:22px;font-weight:800;text-align:center;margin:6px 0">25:00</div>
+    <div style="display:flex;gap:6px">
+      <button class="bonus-ripple" onclick="bonusFocusToggle()" id="bonus-focus-btn" style="flex:1;border:1px solid var(--bor);background:var(--ac);color:#fff;border-radius:8px;padding:6px;font-size:11px;cursor:pointer">Start</button>
+      <button class="bonus-ripple" onclick="bonusFocusReset()" style="border:1px solid var(--bor);background:var(--bg);border-radius:8px;padding:6px 9px;font-size:11px;cursor:pointer">↺</button>
+    </div>`;
+  document.body.appendChild(div);
+}
+let bonusFocusInterval = null, bonusFocusSeconds = 25 * 60;
+function bonusFocusToggle(){
+  const btn = g('bonus-focus-btn');
+  if (bonusFocusInterval) {
+    clearInterval(bonusFocusInterval); bonusFocusInterval = null;
+    if (btn) btn.textContent = 'Start';
+  } else {
+    bonusFocusInterval = setInterval(() => {
+      bonusFocusSeconds = Math.max(0, bonusFocusSeconds - 1);
+      const m = String(Math.floor(bonusFocusSeconds / 60)).padStart(2, '0');
+      const s = String(bonusFocusSeconds % 60).padStart(2, '0');
+      const disp = g('bonus-focus-display'); if (disp) disp.textContent = m + ':' + s;
+      if (bonusFocusSeconds === 0) {
+        clearInterval(bonusFocusInterval); bonusFocusInterval = null;
+        if (btn) btn.textContent = 'Start';
+        if (typeof toast === 'function') toast('⏱️ Focus session complete!');
+      }
+    }, 1000);
+    if (btn) btn.textContent = 'Pause';
+  }
+}
+function bonusFocusReset(){
+  clearInterval(bonusFocusInterval); bonusFocusInterval = null;
+  bonusFocusSeconds = 25 * 60;
+  const disp = g('bonus-focus-display'); if (disp) disp.textContent = '25:00';
+  const btn = g('bonus-focus-btn'); if (btn) btn.textContent = 'Start';
+}
+
+function bonusUpdateStreak(){
+  const today = new Date().toISOString().slice(0, 10);
   let data;
   try { data = JSON.parse(localStorage.getItem('scholr_streak') || '{}'); } catch (_) { data = {}; }
-  return { count: data.count || 0, best: data.best || 0, lastDate: data.lastDate || null };
-}
-function bonusStreakDays(){ return bonusStreakInfo().count; }
-function bonusStreakCheck(){
-  const todayStr = new Date().toDateString();
-  const data = bonusStreakInfo();
-  if (data.lastDate === todayStr) return; // already counted today
-  const yesterday = new Date(); yesterday.setDate(yesterday.getDate() - 1);
-  const isConsecutive = data.lastDate === yesterday.toDateString();
-  const count = isConsecutive ? data.count + 1 : 1;
-  const best = Math.max(data.best || 0, count);
-  localStorage.setItem('scholr_streak', JSON.stringify({ count, best, lastDate: todayStr }));
-  bonusRenderStreakBadge();
-}
-function bonusRenderStreakBadge(){
+  if (data.lastDate !== today) {
+    const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+    data.count = (data.lastDate === yesterday) ? (data.count || 0) + 1 : 1;
+    data.lastDate = today;
+    localStorage.setItem('scholr_streak', JSON.stringify(data));
+  }
   let badge = g('bonus-streak-badge');
-  const info = bonusStreakInfo();
-  if (!bonusGetUnlocked().streak) { if (badge) badge.remove(); return; }
   if (!badge) {
     badge = document.createElement('div');
     badge.id = 'bonus-streak-badge';
-    badge.className = 'bonus-streak-badge';
+    badge.style.cssText = 'position:fixed;top:14px;right:14px;z-index:7000;background:var(--sur);border:1px solid var(--bor);border-radius:20px;padding:5px 12px;font-size:12px;font-weight:700;box-shadow:var(--sh2);animation:bonusPop .3s ease both';
     document.body.appendChild(badge);
   }
-  badge.innerHTML = `🔥 <span>${info.count} day${info.count===1?'':'s'}</span>`;
+  badge.textContent = '🔥 ' + (data.count || 1) + ' day streak';
 }
 
-/* ---------- Feature: Click sound effects ---------- */
-let _bonusAudioCtx = null;
-function bonusPlayClick(){
-  try {
-    _bonusAudioCtx = _bonusAudioCtx || new (window.AudioContext || window.webkitAudioContext)();
-    const ctx = _bonusAudioCtx;
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.type = 'sine';
-    osc.frequency.value = 720;
-    gain.gain.setValueAtTime(0.08, ctx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.12);
-    osc.connect(gain).connect(ctx.destination);
-    osc.start();
-    osc.stop(ctx.currentTime + 0.12);
-  } catch (_) {}
+function bonusMountQuickNav(){
+  if (typeof PG === 'undefined') return;
+  const bar = document.createElement('div');
+  bar.id = 'bonus-quicknav-bar';
+  bar.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);top:14px;z-index:7000;display:flex;gap:4px;background:var(--sur);border:1px solid var(--bor);border-radius:12px;padding:4px;box-shadow:var(--sh2);flex-wrap:wrap;max-width:90vw;animation:bonusPop .3s ease both';
+  Object.keys(PG).slice(0, 8).forEach(id => {
+    const btn = document.createElement('button');
+    btn.className = 'bonus-ripple';
+    btn.style.cssText = 'border:none;background:transparent;color:var(--ink3);border-radius:8px;padding:5px 9px;font-size:11px;cursor:pointer;transition:all .15s';
+    btn.textContent = PG[id];
+    btn.onclick = () => go(id);
+    btn.onmouseenter = () => btn.style.background = 'var(--s2)';
+    btn.onmouseleave = () => btn.style.background = 'transparent';
+    bar.appendChild(btn);
+  });
+  document.body.appendChild(bar);
 }
 
-/* ---------- Feature: Quick Notes widget ---------- */
-function bonusOpenNotes(){
-  if (g('bonus-notes-card')) return;
-  const card = document.createElement('div');
-  card.id = 'bonus-notes-card';
-  card.className = 'bonus-notes-card';
-  card.innerHTML = `
-    <button class="bonus-notes-close" onclick="bonusCloseNotes()">✕</button>
-    <div style="font-weight:700;font-size:12.5px;margin-bottom:8px">🗒️ Quick Notes</div>
-    <textarea id="bonus-notes-area" placeholder="Jot something down…" oninput="bonusSaveNotes()"></textarea>`;
-  document.body.appendChild(card);
-  const area = g('bonus-notes-area');
-  if (area) area.value = localStorage.getItem('scholr_quicknote') || '';
-}
-function bonusCloseNotes(){
-  const card = g('bonus-notes-card');
-  if (card) card.remove();
-}
-function bonusSaveNotes(){
-  const area = g('bonus-notes-area');
-  if (area) localStorage.setItem('scholr_quicknote', area.value);
+// Auto-speak hook: if enabled, read bot replies aloud automatically once streaming finishes.
+const _bonusOrigAddSpeaker = typeof aiAddSpeakerButton === 'function' ? aiAddSpeakerButton : null;
+function bonusMaybeAutoSpeak(fullReply){
+  const flags = bonusGetUnlocked();
+  if (flags.autospeak && fullReply && typeof aiSpeak === 'function') aiSpeak(fullReply);
 }
 
-function bonusApplyEffects(flags){
-  bonusRenderStreakBadge();
-  if (flags.streak) bonusStreakCheck();
-}
-
-function bonusFireConfetti(){
-  const colors = ['#ff6b6b', '#4ecdc4', '#ffe66d', '#a78bfa', '#60a5fa', '#34d399'];
-  for (let i = 0; i < 60; i++) {
-    const piece = document.createElement('div');
-    piece.className = 'bonus-confetti-piece';
-    const size = 6 + Math.random() * 6;
-    piece.style.width = size + 'px';
-    piece.style.height = (size * 0.4) + 'px';
-    piece.style.left = Math.random() * 100 + 'vw';
-    piece.style.background = colors[Math.floor(Math.random() * colors.length)];
-    piece.style.animationDuration = (2.2 + Math.random() * 1.6) + 's';
-    document.body.appendChild(piece);
-    setTimeout(() => piece.remove(), 4000);
-  }
-}
-
-// Ripple effect for any element with .bonus-ripple (also plays a click sound when unlocked)
+// Ripple effect for any element with .bonus-ripple
 document.addEventListener('click', (e) => {
   const el = e.target.closest && e.target.closest('.bonus-ripple');
   if (!el) return;
@@ -9309,7 +9384,6 @@ document.addEventListener('click', (e) => {
   fx.style.top = (e.clientY - rect.top - size / 2) + 'px';
   el.appendChild(fx);
   setTimeout(() => fx.remove(), 500);
-  if (bonusGetUnlocked().sound) bonusPlayClick();
 });
 
 const BONUS_HTML = `
@@ -9317,8 +9391,11 @@ const BONUS_HTML = `
   <div class="bonus-codes-title">🎁 Bonus Codes</div>
   <div style="font-size:11px;color:var(--ink4)">Have a code? Redeem it here to unlock extra features.</div>
   <div class="bonus-codes-row">
-    <input id="bonus-code-input" type="text" placeholder="ENTER CODE" maxlength="20" onkeydown="if(event.key==='Enter')bonusRedeemCode()"/>
+    <input id="bonus-code-input" type="text" placeholder="ENTER CODE" maxlength="24" onkeydown="if(event.key==='Enter')bonusRedeemCode()"/>
     <button class="bonus-ripple" onclick="bonusRedeemCode()">Redeem</button>
+  </div>
+  <div class="bonus-codes-row">
+    <button class="bonus-ripple" style="flex:1;background:var(--s2);color:var(--ink3);border:1px solid var(--bor)" onclick="bonusResetLastCode()">↺ Reset previous code</button>
   </div>
   <div id="bonus-code-msg" class="bonus-codes-msg"></div>
   <div id="bonus-unlocked-list" class="bonus-unlocked-list"></div>
@@ -9329,7 +9406,7 @@ function bonusEnsureDefault(){
   const flags = bonusGetUnlocked();
   if (!flags.starter) {
     flags.starter = true;
-    ['confetti','focus','streak','sound','notes'].forEach(f => flags[f] = true);
+    BONUS_STARTER_FLAGS.forEach(f => flags[f] = true);
     bonusSetUnlocked(flags);
   }
 }
@@ -9360,6 +9437,7 @@ function bonusInit(){
   bonusApplyEffects(bonusGetUnlocked());
   bonusRenderUnlocked();
 }
+
 
 document.addEventListener('DOMContentLoaded', bonusInit);
 if (document.readyState !== 'loading') bonusInit();
