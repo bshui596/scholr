@@ -383,4 +383,77 @@ app.post('/api/rewrite', async (req, res) => {
   }
 });
 
-app.listen(PORT, () => console.log(`Scholr AI backend listening on http://localhost:${PORT}`));
+
+// ---------- 12. Translate ----------
+// POST { text, targetLanguage } -> { translated }
+app.post('/api/translate', async (req, res) => {
+  try {
+    if (!requireKey(res)) return;
+    const text = textField(req, res, 'text');
+    if (!text) return;
+    const targetLanguage = (typeof req.body.targetLanguage === 'string' && req.body.targetLanguage.trim()) || 'Spanish';
+    const translated = await geminiGenerate(
+      `Translate the following text to ${targetLanguage}. Return ONLY the translation:\n\n${text}`,
+      'You are a precise translator. Output only the translated text — no notes.',
+      1200
+    );
+    res.json({ translated });
+  } catch (err) {
+    console.error('Error in /api/translate:', err);
+    res.status(502).json({ error: 'Could not translate this text right now.' });
+  }
+});
+
+// ---------- 13. Brainstorm ideas ----------
+// POST { topic, count? } -> { ideas: string[] }
+app.post('/api/brainstorm', async (req, res) => {
+  try {
+    if (!requireKey(res)) return;
+    const topic = textField(req, res, 'topic', 1000);
+    if (!topic) return;
+    let count = parseInt(req.body.count, 10);
+    if (!Number.isFinite(count) || count < 1) count = 8;
+    count = Math.min(count, 15);
+    const raw = await geminiGenerate(
+      `Brainstorm exactly ${count} distinct, creative ideas for: ${topic}\n\n` +
+      `Respond ONLY with valid JSON: an array of short strings, e.g. ["idea 1","idea 2"]. No markdown, no extra text.`,
+      'You output only strict, valid JSON — nothing else.',
+      900
+    );
+    let ideas;
+    try {
+      const cleaned = raw.replace(/^```json\s*|\s*```$/g, '').trim();
+      ideas = JSON.parse(cleaned);
+      if (!Array.isArray(ideas)) throw new Error('not an array');
+    } catch (parseErr) {
+      return res.status(502).json({ error: 'The AI returned an unexpected format. Please try again.' });
+    }
+    res.json({ ideas });
+  } catch (err) {
+    console.error('Error in /api/brainstorm:', err);
+    res.status(502).json({ error: 'Could not brainstorm ideas right now.' });
+  }
+});
+
+// ---------- 14. Citation generator ----------
+// POST { source, style? } -> { citation }  (style: "APA" | "MLA" | "Chicago", default "APA")
+app.post('/api/citation', async (req, res) => {
+  try {
+    if (!requireKey(res)) return;
+    const source = textField(req, res, 'source', 1500);
+    if (!source) return;
+    const style = (typeof req.body.style === 'string' && req.body.style.trim()) || 'APA';
+    const citation = await geminiGenerate(
+      `Generate a ${style}-style citation for this source (infer missing details reasonably, note any assumptions ` +
+      `briefly in [brackets] only if necessary): ${source}`,
+      `You are a citation assistant. Output only the ${style} citation (plus brief bracketed notes only if truly needed).`,
+      300
+    );
+    res.json({ citation });
+  } catch (err) {
+    console.error('Error in /api/citation:', err);
+    res.status(502).json({ error: 'Could not generate a citation right now.' });
+  }
+});
+
+app.listen(PORT, () => console.log(`Scholr AI backend listening on https://scholr-btv4.onrender.com`));
