@@ -456,4 +456,46 @@ app.post('/api/citation', async (req, res) => {
   }
 });
 
-app.listen(PORT, () => console.log(`Scholr AI backend listening on https://scholr-btv4.onrender.com`));
+
+// ---------- 15. Exam study-plan content generator ----------
+// POST { topics: string[], examTitle, dayCount } -> { days: [ [taskString,...], ... ] }
+// Content-only: the frontend supplies the actual calendar dates and just
+// asks the AI to fill in what to study/do on each of dayCount days.
+app.post('/api/examplan', async (req, res) => {
+  try {
+    if (!requireKey(res)) return;
+    const { topics, examTitle } = req.body || {};
+    let dayCount = parseInt(req.body.dayCount, 10);
+    if (!Number.isFinite(dayCount) || dayCount < 1) {
+      return res.status(400).json({ error: 'A valid "dayCount" is required.' });
+    }
+    dayCount = Math.min(dayCount, 30);
+    const topicList = Array.isArray(topics) ? topics.filter(t => typeof t === 'string' && t.trim()).slice(0, 30) : [];
+    const title = (typeof examTitle === 'string' && examTitle.trim()) ? examTitle.trim() : 'this exam';
+
+    const raw = await geminiGenerate(
+      `Create a day-by-day study plan with exactly ${dayCount} days for an upcoming exam titled "${title}"` +
+      (topicList.length ? ` covering these topics: ${topicList.join(', ')}.` : ' (no specific topics given — use general review tasks).') +
+      ` Distribute topics across the earlier days; make the final day (or two) cumulative review and practice/self-quiz. ` +
+      `Respond ONLY with valid JSON: an array of exactly ${dayCount} arrays, one per day in order, each containing 1-2 short, ` +
+      `specific, actionable task strings for that day. No markdown, no extra text.`,
+      'You output only strict, valid JSON — nothing else. No code fences, no commentary.',
+      1200
+    );
+
+    let days;
+    try {
+      const cleaned = raw.replace(/^```json\s*|\s*```$/g, '').trim();
+      days = JSON.parse(cleaned);
+      if (!Array.isArray(days)) throw new Error('not an array');
+    } catch (parseErr) {
+      return res.status(502).json({ error: 'The AI returned an unexpected format. Please try again.' });
+    }
+    res.json({ days });
+  } catch (err) {
+    console.error('Error in /api/examplan:', err);
+    res.status(502).json({ error: 'Could not generate an exam study plan right now.' });
+  }
+});
+
+app.listen(PORT, () => console.log(`Scholr AI backend listening on http://localhost:${PORT}`));
