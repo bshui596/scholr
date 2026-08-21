@@ -8328,17 +8328,25 @@ const AI_CSS = `
 .ai-chat-panel{
   position:fixed;right:22px;bottom:90px;z-index:8000;
   width:380px;max-width:calc(100vw - 32px);height:520px;max-height:calc(100vh - 120px);
+  min-width:300px;min-height:340px;
   background:var(--sur);border:1px solid var(--bor);border-radius:16px;
   box-shadow:var(--sh3);display:flex;flex-direction:column;overflow:hidden;
   opacity:0;transform:translateY(16px) scale(.96);pointer-events:none;
   transition:opacity .2s ease,transform .2s cubic-bezier(.34,1.56,.64,1);
 }
 .ai-chat-panel.on{opacity:1;transform:none;pointer-events:auto}
+.ai-chat-panel.ai-dragging{transition:none;user-select:none}
+.ai-resize-handle{
+  position:absolute;left:2px;bottom:2px;width:16px;height:16px;cursor:nwse-resize;
+  background:linear-gradient(135deg,transparent 50%,var(--bor) 50%);border-radius:0 0 0 4px;z-index:2;
+}
 
 .ai-chat-head{
   display:flex;align-items:center;justify-content:space-between;gap:8px;
   padding:12px 14px;border-bottom:1px solid var(--bor);background:var(--s2);flex-shrink:0;
+  cursor:grab;
 }
+.ai-chat-head:active{cursor:grabbing}
 .ai-tab-row{
   display:flex;gap:4px;padding:8px 10px;border-bottom:1px solid var(--bor);
   overflow-x:auto;flex-shrink:0;scrollbar-width:thin;
@@ -8361,8 +8369,8 @@ const AI_CSS = `
   animation:aiMsgIn .25s cubic-bezier(.2,.8,.3,1) both;
 }
 @keyframes aiMsgIn{from{opacity:0;transform:translateY(6px) scale(.98)}to{opacity:1;transform:none}}
-.ai-msg-bot{align-self:flex-start;background:var(--s2);color:var(--ink2);border-bottom-left-radius:3px}
-.ai-msg-user{align-self:flex-end;background:var(--ac);color:#fff;border-bottom-right-radius:3px}
+.ai-msg-bot{align-self:flex-start;background:var(--s2);color:var(--ink2);border-bottom-left-radius:3px;border:1px solid var(--bor);box-shadow:0 1px 3px rgba(0,0,0,.06)}
+.ai-msg-user{align-self:flex-end;background:var(--ac);color:#fff;border-bottom-right-radius:3px;box-shadow:0 1px 3px rgba(0,0,0,.1)}
 
 .ai-typing-dots{display:inline-flex;gap:3px;align-items:center;padding:2px 0}
 .ai-typing-dots span{
@@ -8449,7 +8457,8 @@ const AI_HTML = `
 <button id="ai-chat-fab" class="ai-chat-fab" onclick="aiChatToggle()" title="Scholr AI Tools" aria-label="Open AI tools">🤖</button>
 
 <div id="ai-chat-panel" class="ai-chat-panel" role="dialog" aria-label="AI assistant">
-  <div class="ai-chat-head">
+  <div id="ai-resize-handle" class="ai-resize-handle" title="Drag to resize"></div>
+  <div class="ai-chat-head" id="ai-chat-head">
     <div style="display:flex;align-items:center;gap:8px">
       <span style="font-size:18px">🤖</span>
       <div>
@@ -8602,8 +8611,48 @@ const AI_HTML = `
 /* ---- widget logic ---- */
 const AI_BASE = 'https://scholr-btv4.onrender.com';
 const AI_CHAT_ENDPOINT = AI_BASE + '/api/chat';
+const AI_TIMEOUT_MS = 20000; // fail fast with a clear message instead of hanging forever
 
-let aiChatHistory = [];
+// ---------- Request timing/success log (feeds the Admin Panel stats) ----------
+function aiLoadReqLog(){
+  try { return JSON.parse(localStorage.getItem('scholr_ai_reqlog') || '[]'); } catch (_) { return []; }
+}
+let aiReqLog = aiLoadReqLog();
+function aiLogRequest(endpoint, ms, ok){
+  aiReqLog.push({ endpoint, ms, ok, t: Date.now() });
+  if (aiReqLog.length > 40) aiReqLog = aiReqLog.slice(-40);
+  try { localStorage.setItem('scholr_ai_reqlog', JSON.stringify(aiReqLog)); } catch (_) {}
+}
+function aiGetStats(){
+  if (!aiReqLog.length) return null;
+  const recent = aiReqLog.slice(-20);
+  const okCount = recent.filter(r => r.ok).length;
+  const avgMs = Math.round(recent.reduce((s,r) => s + r.ms, 0) / recent.length);
+  const last = recent[recent.length - 1];
+  const byEndpoint = {};
+  recent.forEach(r => {
+    if (!byEndpoint[r.endpoint]) byEndpoint[r.endpoint] = { count: 0, totalMs: 0 };
+    byEndpoint[r.endpoint].count++;
+    byEndpoint[r.endpoint].totalMs += r.ms;
+  });
+  return {
+    lastMs: last.ms, lastOk: last.ok, lastEndpoint: last.endpoint,
+    avgMs, successRate: Math.round((okCount / recent.length) * 100),
+    totalLogged: aiReqLog.length, byEndpoint
+  };
+}
+const aiSessionStart = Date.now();
+
+// ---------- Memory: restore chat history + panel size/position across reloads ----------
+function aiLoadHistory(){
+  try { return JSON.parse(localStorage.getItem('scholr_ai_chat_history') || '[]'); }
+  catch (_) { return []; }
+}
+function aiSaveHistory(){
+  try { localStorage.setItem('scholr_ai_chat_history', JSON.stringify(aiChatHistory.slice(-30))); } catch (_) {}
+}
+
+let aiChatHistory = aiLoadHistory();
 let aiChatOpen = false;
 let aiChatBusy = false;
 
@@ -8613,6 +8662,92 @@ function aiChatToggle(){
   if (panel) panel.classList.toggle('on', aiChatOpen);
   if (aiChatOpen) { const inp = g('ai-chat-input'); if (inp) setTimeout(() => inp.focus(), 60); }
 }
+
+// Restore previous conversation into the chat pane on load (if any)
+function aiRestoreChatUI(){
+  const wrap = g('ai-chat-msgs');
+  if (!wrap || !aiChatHistory.length) return;
+  wrap.querySelectorAll('.ai-msg').forEach((el,i) => { if (i>0) el.remove(); }); // keep the greeting
+  aiChatHistory.forEach(turn => {
+    const el = aiChatAppendMsg(turn.content, turn.role === 'user' ? 'user' : 'bot');
+    if (turn.role === 'assistant' && el) { aiTypeset(el); aiAddSpeakerButton(el, turn.content); }
+  });
+}
+
+// ---------- Drag + resize the panel (position/size saved to localStorage) ----------
+function aiApplySavedGeometry(){
+  const panel = g('ai-chat-panel');
+  if (!panel) return;
+  try {
+    const geo = JSON.parse(localStorage.getItem('scholr_ai_panel_geo') || 'null');
+    if (geo) {
+      if (geo.w) panel.style.width = geo.w + 'px';
+      if (geo.h) panel.style.height = geo.h + 'px';
+      if (geo.top != null && geo.left != null) {
+        panel.style.top = geo.top + 'px'; panel.style.left = geo.left + 'px';
+        panel.style.right = 'auto'; panel.style.bottom = 'auto';
+      }
+    }
+  } catch (_) {}
+}
+function aiSaveGeometry(){
+  const panel = g('ai-chat-panel');
+  if (!panel) return;
+  const rect = panel.getBoundingClientRect();
+  localStorage.setItem('scholr_ai_panel_geo', JSON.stringify({
+    w: Math.round(rect.width), h: Math.round(rect.height),
+    top: Math.round(rect.top), left: Math.round(rect.left)
+  }));
+}
+(function initAiDragResize(){
+  document.addEventListener('mousedown', (e) => {
+    const head = e.target.closest && e.target.closest('#ai-chat-head');
+    const handle = e.target.closest && e.target.closest('#ai-resize-handle');
+    const panel = g('ai-chat-panel');
+    if (!panel) return;
+
+    if (head && !e.target.closest('button')) {
+      const rect = panel.getBoundingClientRect();
+      const offX = e.clientX - rect.left, offY = e.clientY - rect.top;
+      panel.classList.add('ai-dragging');
+      const onMove = (me) => {
+        panel.style.left = Math.max(4, Math.min(window.innerWidth - 60, me.clientX - offX)) + 'px';
+        panel.style.top = Math.max(4, Math.min(window.innerHeight - 60, me.clientY - offY)) + 'px';
+        panel.style.right = 'auto'; panel.style.bottom = 'auto';
+      };
+      const onUp = () => {
+        panel.classList.remove('ai-dragging');
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        aiSaveGeometry();
+      };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    } else if (handle) {
+      const rect = panel.getBoundingClientRect();
+      const startX = e.clientX, startY = e.clientY, startW = rect.width, startH = rect.height, startLeft = rect.left;
+      panel.classList.add('ai-dragging');
+      const onMove = (me) => {
+        const newW = Math.max(300, startW - (me.clientX - startX));
+        const newH = Math.max(340, startH + (me.clientY - startY));
+        panel.style.width = newW + 'px';
+        panel.style.height = newH + 'px';
+        panel.style.left = (startLeft + (startW - newW)) + 'px';
+        panel.style.right = 'auto'; panel.style.bottom = 'auto';
+      };
+      const onUp = () => {
+        panel.classList.remove('ai-dragging');
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        aiSaveGeometry();
+      };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    }
+  });
+  document.addEventListener('DOMContentLoaded', aiApplySavedGeometry);
+  if (document.readyState !== 'loading') aiApplySavedGeometry();
+})();
 
 // Tab switching
 document.addEventListener('click', (e) => {
@@ -8654,6 +8789,7 @@ async function aiChatSend(e){
   inp.value = '';
   aiChatAppendMsg(text, 'user');
   aiChatHistory.push({ role: 'user', content: text });
+  aiSaveHistory();
 
   const typingEl = g('ai-chat-typing');
   const sendBtn = g('ai-chat-send-btn');
@@ -8664,72 +8800,111 @@ async function aiChatSend(e){
 
   const botEl = aiChatAppendMsg('', 'bot');
   let fullReply = '';
+  const reqStart = performance.now();
 
-  try {
-    const res = await fetch(AI_CHAT_ENDPOINT, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: text, history: aiChatHistory.slice(-10) })
-    });
-    if (!res.ok || !res.body) {
-      let errMsg = 'Server error (' + res.status + ')';
-      try { const errData = await res.json(); if (errData.error) errMsg = errData.error; } catch (_) {}
-      throw new Error(errMsg);
-    }
-    if (typingEl) typingEl.style.display = 'none';
+  // One retry on network-level failure (not on explicit server error messages) — keeps chat working through a hiccup instead of dying on the first blip.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    fullReply = '';
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
+    try {
+      const res = await fetch(AI_CHAT_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: text, history: aiChatHistory.slice(-10) }),
+        signal: controller.signal
+      });
+      clearTimeout(timer);
+      if (!res.ok || !res.body) {
+        let errMsg = 'Server error (' + res.status + ')';
+        try { const errData = await res.json(); if (errData.error) errMsg = errData.error; } catch (_) {}
+        throw new Error(errMsg);
+      }
+      if (typingEl) typingEl.style.display = 'none';
 
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    const msgsWrap = g('ai-chat-msgs');
-    let buffer = '';
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\\n');
-      buffer = lines.pop();
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        const jsonStr = line.slice(6).trim();
-        if (!jsonStr) continue;
-        let parsed;
-        try { parsed = JSON.parse(jsonStr); } catch (_) { continue; }
-        if (parsed.error) throw new Error(parsed.error);
-        if (parsed.text) {
-          fullReply += parsed.text;
-          botEl.textContent = fullReply;
-          if (msgsWrap) msgsWrap.scrollTop = msgsWrap.scrollHeight;
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      const msgsWrap = g('ai-chat-msgs');
+      let buffer = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\\n');
+        buffer = lines.pop();
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          const jsonStr = line.slice(6).trim();
+          if (!jsonStr) continue;
+          let parsed;
+          try { parsed = JSON.parse(jsonStr); } catch (_) { continue; }
+          if (parsed.error) throw new Error(parsed.error);
+          if (parsed.text) {
+            fullReply += parsed.text;
+            botEl.textContent = fullReply;
+            if (msgsWrap) msgsWrap.scrollTop = msgsWrap.scrollHeight;
+          }
         }
       }
+      if (!fullReply.trim()) botEl.textContent = "Sorry, I couldn't come up with a response to that.";
+      aiChatHistory.push({ role: 'assistant', content: fullReply });
+      aiSaveHistory();
+      aiLogRequest('chat', Math.round(performance.now() - reqStart), true);
+      break; // success — no need to retry
+    } catch (err) {
+      clearTimeout(timer);
+      const isAbort = err.name === 'AbortError';
+      const isNetwork = err instanceof TypeError; // fetch network failure
+      if (attempt === 0 && (isAbort || isNetwork)) {
+        botEl.textContent = 'Connection hiccup — retrying…';
+        continue;
+      }
+      console.error('AI chat error:', err);
+      botEl.textContent = '⚠️ Sorry, I couldn\'t reach the assistant (' + (isAbort ? 'timed out' : err.message) + ').';
+      aiLogRequest('chat', Math.round(performance.now() - reqStart), false);
     }
-    if (!fullReply.trim()) botEl.textContent = "Sorry, I couldn't come up with a response to that.";
-    aiChatHistory.push({ role: 'assistant', content: fullReply });
-  } catch (err) {
-    console.error('AI chat error:', err);
-    botEl.textContent = '⚠️ Sorry, I couldn\'t reach the assistant (' + err.message + ').';
-  } finally {
-    aiChatBusy = false;
-    if (typingEl) typingEl.style.display = 'none';
-    if (sendBtn) sendBtn.disabled = false;
-    inp.disabled = false;
-    inp.focus();
-    aiTypeset(botEl);
-    aiAddSpeakerButton(botEl, fullReply);
   }
+
+  aiChatBusy = false;
+  if (typingEl) typingEl.style.display = 'none';
+  if (sendBtn) sendBtn.disabled = false;
+  inp.disabled = false;
+  inp.focus();
+  aiTypeset(botEl);
+  aiAddSpeakerButton(botEl, fullReply);
   return false;
 }
 
 // ---------- Shared helper for one-shot tool endpoints ----------
+// Includes a timeout + one automatic retry on network failure so a single
+// dropped request doesn't make a tool look broken. Also logs timing for the Admin Panel.
 async function aiPost(path, body){
-  const res = await fetch(AI_BASE + path, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
-  });
-  let data = {};
-  try { data = await res.json(); } catch (_) {}
-  if (!res.ok) throw new Error(data.error || ('Server error (' + res.status + ')'));
-  return data;
+  const reqStart = performance.now();
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
+    try {
+      const res = await fetch(AI_BASE + path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: controller.signal
+      });
+      clearTimeout(timer);
+      let data = {};
+      try { data = await res.json(); } catch (_) {}
+      if (!res.ok) throw new Error(data.error || ('Server error (' + res.status + ')'));
+      aiLogRequest(path.replace('/api/',''), Math.round(performance.now() - reqStart), true);
+      return data;
+    } catch (err) {
+      clearTimeout(timer);
+      const isAbort = err.name === 'AbortError';
+      const isNetwork = err instanceof TypeError;
+      if (attempt === 0 && (isAbort || isNetwork)) continue;
+      aiLogRequest(path.replace('/api/',''), Math.round(performance.now() - reqStart), false);
+      throw isAbort ? new Error('Request timed out — please try again.') : err;
+    }
+  }
 }
 
 // ---------- Generic tool runner wired to the tab panes ----------
@@ -8863,6 +9038,8 @@ async function runAiQuiz(){
   container.id = 'ai-tools-container';
   container.innerHTML = AI_HTML;
   document.body.appendChild(container);
+  aiApplySavedGeometry();
+  aiRestoreChatUI();
 })();
 
 /* ══════════════════════════════════════════════
@@ -9092,16 +9269,45 @@ function bonusAdminPanelHtml(){
     .map(id => `<button onclick="go('${id}')">${(typeof PG!=='undefined'&&PG[id])||id}</button>`)
     .join('');
 
+  // ---- AI performance stats ----
+  const stats = aiGetStats();
+  const perfRows = stats ? `
+      <div class="bonus-admin-stat"><span>Last AI response</span><span>${stats.lastMs} ms ${stats.lastOk ? '✅' : '❌'} (${stats.lastEndpoint})</span></div>
+      <div class="bonus-admin-stat"><span>Avg response (last 20)</span><span>${stats.avgMs} ms</span></div>
+      <div class="bonus-admin-stat"><span>Success rate (last 20)</span><span>${stats.successRate}%</span></div>
+      <div class="bonus-admin-stat"><span>Total AI requests logged</span><span>${stats.totalLogged}</span></div>
+      ${Object.entries(stats.byEndpoint).map(([ep,d]) =>
+        `<div class="bonus-admin-stat" style="padding-left:10px;font-size:11px;opacity:.8"><span>↳ ${ep}</span><span>${Math.round(d.totalMs/d.count)} ms avg (${d.count}×)</span></div>`
+      ).join('')}
+  ` : `<div class="bonus-admin-stat"><span>AI requests</span><span>none logged yet</span></div>`;
+
+  // ---- "cool data" ----
+  const sessionMin = ((Date.now() - aiSessionStart) / 60000).toFixed(1);
+  const theme = document.documentElement.getAttribute('data-t') || 'default';
+  const online = navigator.onLine ? 'Online ✅' : 'Offline ❌';
+  const unlockedCount = Object.values(bonusGetUnlocked()).filter(Boolean).length;
+
   return `
     <div class="bonus-admin-panel bonus-check-pop">
       <div style="font-weight:700;font-size:12.5px">🛠️ Admin Panel</div>
 
+      <div style="font-size:11px;color:var(--ink4);margin-top:2px">⚡ AI Performance</div>
+      ${perfRows}
+
+      <div style="font-size:11px;color:var(--ink4);margin-top:4px">📊 App Data</div>
       <div class="bonus-admin-stat"><span>Notes</span><span>${noteCount}</span></div>
       <div class="bonus-admin-stat"><span>Courses</span><span>${courseCount}</span></div>
       <div class="bonus-admin-stat"><span>Homework items</span><span>${hwCount}</span></div>
       <div class="bonus-admin-stat"><span>localStorage keys</span><span>${keyCount}</span></div>
       <div class="bonus-admin-stat"><span>Approx. storage used</span><span>${(approxBytes/1024).toFixed(1)} KB</span></div>
       <div class="bonus-admin-stat"><span>Debug mode</span><span id="bonus-debug-state">${localStorage.getItem('scholr_debug') === '1' ? 'ON' : 'OFF'}</span></div>
+
+      <div style="font-size:11px;color:var(--ink4);margin-top:4px">🧭 Session</div>
+      <div class="bonus-admin-stat"><span>Time on page</span><span>${sessionMin} min</span></div>
+      <div class="bonus-admin-stat"><span>Theme</span><span>${theme}</span></div>
+      <div class="bonus-admin-stat"><span>Network</span><span>${online}</span></div>
+      <div class="bonus-admin-stat"><span>Screen size</span><span>${window.innerWidth}×${window.innerHeight}</span></div>
+      <div class="bonus-admin-stat"><span>Bonus features unlocked</span><span>${unlockedCount}</span></div>
 
       <div style="font-size:11px;color:var(--ink4);margin-top:4px">Jump to any page:</div>
       <div class="bonus-admin-btns">${navButtons}</div>
@@ -9114,6 +9320,7 @@ function bonusAdminPanelHtml(){
         <button onclick="bonusAdminClearNotes()">Clear all notes</button>
         <button onclick="bonusAdminClearHW()">Clear all homework</button>
         <button onclick="bonusConfirmClear()">⚠️ Clear ALL local data</button>
+        <button onclick="bonusRenderUnlocked()">🔄 Refresh stats</button>
       </div>
     </div>`;
 }
@@ -9192,13 +9399,13 @@ function bonusApplyFeatureHooks(flags){
 
       [['translate','🌐 Translate'], ['brainstorm','💭 Brainstorm'], ['citation','📚 Citation']].forEach(([key,label]) => {
         const tabBtn = document.createElement('button');
-        tabBtn.className = 'ai-tab bonus-ripple';
+        tabBtn.className = 'ai-tab bonus-ripple ai-tab-extra';
         tabBtn.dataset.tab = key;
         tabBtn.textContent = label;
         tabRow.appendChild(tabBtn);
 
         const pane = document.createElement('div');
-        pane.className = 'ai-body hidden';
+        pane.className = 'ai-body hidden ai-tab-extra-pane';
         pane.id = 'ai-pane-' + key;
         if (key === 'translate') {
           pane.innerHTML = `<div class="ai-tool-pane">
@@ -9229,13 +9436,26 @@ function bonusApplyFeatureHooks(flags){
       });
     }
   }
+  if (!flags.toolsExtra && g('ai-tab-extra-added')) {
+    document.querySelectorAll('.ai-tab-extra').forEach(el => el.remove());
+    document.querySelectorAll('.ai-tab-extra-pane').forEach(el => el.remove());
+    const marker = g('ai-tab-extra-added'); if (marker) marker.remove();
+    // if an extra tab was the active one, fall back to Chat
+    const activeTab = document.querySelector('.ai-tab.active');
+    if (!activeTab) {
+      const chatTab = document.querySelector('.ai-tab[data-tab="chat"]');
+      if (chatTab) chatTab.classList.add('active');
+      const chatPane = g('ai-pane-chat'); if (chatPane) chatPane.classList.remove('hidden');
+    }
+  }
 
   // Focus timer widget
   if (flags.focus && !g('bonus-focus-widget')) bonusMountFocusTimer();
-  if (!flags.focus) { const w = g('bonus-focus-widget'); if (w) w.remove(); }
+  if (!flags.focus) { const w = g('bonus-focus-widget'); if (w) w.remove(); clearInterval(bonusFocusInterval); bonusFocusInterval = null; }
 
   // Daily streak tracker
   if (flags.streak) bonusUpdateStreak();
+  if (!flags.streak) { const b = g('bonus-streak-badge'); if (b) b.remove(); }
 
   // Quick-export button floats near the FAB if unlocked
   if (flags.quickexport && !g('bonus-quickexport-btn')) {
