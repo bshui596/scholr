@@ -40,23 +40,36 @@ function buildContents(message, history) {
 
 // Non-streaming Gemini call used by the utility endpoints (summarize, quiz, etc.)
 // generationConfig.maxOutputTokens keeps these fast + focused instead of rambling.
-async function geminiGenerate(promptText, systemText, maxOutputTokens = 1024) {
+// A hard timeout means a slow/hung Gemini call fails cleanly instead of hanging the request.
+const GEMINI_TIMEOUT_MS = 25000;
+
+async function geminiGenerate(promptText, systemText, maxOutputTokens = 700) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      contents: [{ role: 'user', parts: [{ text: promptText }] }],
-      systemInstruction: { parts: [{ text: systemText }] },
-      generationConfig: { maxOutputTokens, temperature: 0.6 }
-    })
-  });
-  if (!res.ok) {
-    const errText = await res.text().catch(() => '');
-    throw new Error(`Gemini error ${res.status}: ${errText}`);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ role: 'user', parts: [{ text: promptText }] }],
+        systemInstruction: { parts: [{ text: systemText }] },
+        generationConfig: { maxOutputTokens, temperature: 0.6 }
+      }),
+      signal: controller.signal
+    });
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      throw new Error(`Gemini error ${res.status}: ${errText}`);
+    }
+    const data = await res.json();
+    return (data?.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join('').trim();
+  } catch (err) {
+    if (err.name === 'AbortError') throw new Error('Gemini request timed out');
+    throw err;
+  } finally {
+    clearTimeout(timer);
   }
-  const data = await res.json();
-  return (data?.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join('').trim();
 }
 
 function textField(req, res, field, max = 6000) {
@@ -89,6 +102,8 @@ app.post('/api/chat', async (req, res) => {
 
     const contents = buildContents(message, history);
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:streamGenerateContent?alt=sse&key=${GEMINI_API_KEY}`;
+    const streamController = new AbortController();
+    const streamTimer = setTimeout(() => streamController.abort(), GEMINI_TIMEOUT_MS);
 
     const geminiRes = await fetch(url, {
       method: 'POST',
@@ -96,9 +111,10 @@ app.post('/api/chat', async (req, res) => {
       body: JSON.stringify({
         contents,
         systemInstruction: { parts: [{ text: CHAT_SYSTEM }] },
-        generationConfig: { maxOutputTokens: 1536, temperature: 0.6 }
-      })
-    });
+        generationConfig: { maxOutputTokens: 1024, temperature: 0.6 }
+      }),
+      signal: streamController.signal
+    }).finally(() => clearTimeout(streamTimer));
 
     if (!geminiRes.ok || !geminiRes.body) {
       const errText = await geminiRes.text().catch(() => '');
@@ -151,7 +167,7 @@ app.post('/api/summarize', async (req, res) => {
     const summary = await geminiGenerate(
       `Summarize the following student note in 3-6 concise bullet points:\n\n${text}`,
       'You produce short, clear study summaries in plain text with "- " bullet points. No preamble.',
-      600
+      450
     );
     res.json({ summary });
   } catch (err) {
@@ -175,7 +191,7 @@ app.post('/api/flashcards', async (req, res) => {
       `Create exactly ${count} flashcards (question + answer) from this study material:\n\n${text}\n\n` +
       `Respond ONLY with valid JSON: an array of objects like [{"question":"...","answer":"..."}]. No markdown, no extra text.`,
       'You output only strict, valid JSON — nothing else. No code fences, no commentary.',
-      1400
+      1000
     );
 
     let flashcards;
@@ -209,7 +225,7 @@ app.post('/api/quiz', async (req, res) => {
       `Respond ONLY with valid JSON: an array like ` +
       `[{"question":"...","options":["A","B","C","D"],"answerIndex":0}]. answerIndex is 0-based. No markdown, no extra text.`,
       'You output only strict, valid JSON — nothing else. No code fences, no commentary.',
-      1600
+      1200
     );
 
     let questions;
@@ -242,7 +258,7 @@ app.post('/api/explain', async (req, res) => {
     const explanation = await geminiGenerate(
       `Explain the following concept/question:\n\n${text}`,
       `You are a patient tutor. ${instruction} Use LaTeX ($...$ / $$...$$) for any math.`,
-      1200
+      800
     );
     res.json({ explanation });
   } catch (err) {
@@ -262,7 +278,7 @@ app.post('/api/polish', async (req, res) => {
       `Fix grammar, spelling, and clarity in this student writing, keeping the original meaning and voice. ` +
       `Return ONLY the corrected text, nothing else:\n\n${text}`,
       'You are a careful copy editor. Output only the corrected text — no notes, no preamble.',
-      1200
+      800
     );
     res.json({ improved });
   } catch (err) {
@@ -289,7 +305,7 @@ app.post('/api/essay', async (req, res) => {
       `Give it a clear thesis, organized paragraphs, and a conclusion. Plain text, no markdown headers.`,
       'You are a skilled student essay-writing assistant. Write original, well-structured essays. ' +
       'This is a drafting aid for a student to learn from and edit, not a final submission.',
-      2000
+      1300
     );
     res.json({ essay });
   } catch (err) {
@@ -309,7 +325,7 @@ app.post('/api/notes', async (req, res) => {
       `Turn the following material into clean, well-organized study notes with short headers and ` +
       `"- " bullet points. Keep key terms, definitions, and important facts. Use LaTeX ($...$) for any math:\n\n${text}`,
       'You are an expert note-taker for students. Output only the notes, no preamble.',
-      1400
+      900
     );
     res.json({ notes });
   } catch (err) {
@@ -329,7 +345,7 @@ app.post('/api/outline', async (req, res) => {
       `Create a detailed essay/report outline for: ${topic}\n\n` +
       `Include an intro with thesis, 3-5 main sections each with sub-points, and a conclusion.`,
       'You output clear, numbered/nested outlines only, no extra commentary.',
-      900
+      650
     );
     res.json({ outline });
   } catch (err) {
@@ -353,7 +369,7 @@ app.post('/api/studyplan', async (req, res) => {
       `Create a ${days}-day study plan to master this material:\n\n${text}\n\n` +
       `Format as "Day 1: ...", "Day 2: ...", etc., with specific, realistic daily tasks.`,
       'You are a study-planning assistant. Output only the day-by-day plan, no extra commentary.',
-      1200
+      800
     );
     res.json({ plan });
   } catch (err) {
@@ -374,7 +390,7 @@ app.post('/api/rewrite', async (req, res) => {
     const rewritten = await geminiGenerate(
       `Rewrite the following text to be ${tone}, keeping the same meaning. Return ONLY the rewritten text:\n\n${text}`,
       'You are a careful writing assistant. Output only the rewritten text — no notes, no preamble.',
-      1200
+      800
     );
     res.json({ rewritten });
   } catch (err) {
@@ -395,7 +411,7 @@ app.post('/api/translate', async (req, res) => {
     const translated = await geminiGenerate(
       `Translate the following text to ${targetLanguage}. Return ONLY the translation:\n\n${text}`,
       'You are a precise translator. Output only the translated text — no notes.',
-      1200
+      800
     );
     res.json({ translated });
   } catch (err) {
@@ -418,7 +434,7 @@ app.post('/api/brainstorm', async (req, res) => {
       `Brainstorm exactly ${count} distinct, creative ideas for: ${topic}\n\n` +
       `Respond ONLY with valid JSON: an array of short strings, e.g. ["idea 1","idea 2"]. No markdown, no extra text.`,
       'You output only strict, valid JSON — nothing else.',
-      900
+      650
     );
     let ideas;
     try {
@@ -447,7 +463,7 @@ app.post('/api/citation', async (req, res) => {
       `Generate a ${style}-style citation for this source (infer missing details reasonably, note any assumptions ` +
       `briefly in [brackets] only if necessary): ${source}`,
       `You are a citation assistant. Output only the ${style} citation (plus brief bracketed notes only if truly needed).`,
-      300
+      250
     );
     res.json({ citation });
   } catch (err) {
@@ -480,7 +496,7 @@ app.post('/api/examplan', async (req, res) => {
       `Respond ONLY with valid JSON: an array of exactly ${dayCount} arrays, one per day in order, each containing 1-2 short, ` +
       `specific, actionable task strings for that day. No markdown, no extra text.`,
       'You output only strict, valid JSON — nothing else. No code fences, no commentary.',
-      1200
+      900
     );
 
     let days;
