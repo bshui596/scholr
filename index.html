@@ -9229,6 +9229,16 @@ function bonusResetAll(){
   if (msg) { msg.textContent = '✅ Reset to default (STR2030 only)'; msg.className = 'bonus-codes-msg ok bonus-check-pop'; }
 }
 
+// Turns OFF one specific feature (even a default starter one) — always
+// removable, individually, regardless of how it was unlocked.
+function bonusRemoveFeature(flag){
+  const flags = bonusGetUnlocked();
+  delete flags[flag];
+  bonusSetUnlocked(flags);
+  bonusApplyEffects(flags);   // tears down the matching onscreen element
+  bonusRenderUnlocked();
+}
+
 function bonusRenderUnlocked(){
   const listEl = g('bonus-unlocked-list');
   const adminSlot = g('bonus-admin-slot');
@@ -9242,7 +9252,7 @@ function bonusRenderUnlocked(){
     items.forEach(([code, v]) => {
       const row = document.createElement('div');
       row.className = 'bonus-unlocked-item bonus-check-pop';
-      row.innerHTML = `<span>${v.label}</span><span style="color:var(--ink4);font-size:10.5px">${code}</span>`;
+      row.innerHTML = `<span>${v.label}</span><span style="display:flex;align-items:center;gap:6px"><span style="color:var(--ink4);font-size:10.5px">${code}</span><button class="bonus-ripple" onclick="bonusRemoveFeature('${v.flag}')" title="Turn off" style="border:none;background:transparent;color:var(--ink4);cursor:pointer;font-size:13px;padding:2px 4px">✕</button></span>`;
       listEl.appendChild(row);
     });
   }
